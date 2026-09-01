@@ -957,6 +957,221 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
 
 .icor-sqlv-modal-bar { margin-top: var(--sqlv-s3); justify-content: flex-end; }
 
+/* ------------------------------------------------- the widget form -- */
+
+.icor-sqlv-form-modal { max-width: min(880px, 96vw); }
+
+.icor-sqlv-form-panes {
+  display: flex;
+  gap: var(--sqlv-s4);
+  align-items: flex-start;
+}
+
+.icor-sqlv-form-fields {
+  flex: 1 1 55%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sqlv-s3);
+  max-height: min(60vh, 560px);
+  overflow-y: auto;
+  padding-right: var(--sqlv-s1);
+}
+
+.icor-sqlv-form-side {
+  flex: 1 1 45%;
+  min-width: 0;
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sqlv-s2);
+}
+
+.icor-sqlv-form-preview .icor-sqlv-tile.is-preview {
+  min-height: 160px;
+  cursor: default;
+}
+
+/* The form stacks on narrow panes: preview above the Save button. */
+@media (max-width: 700px) {
+  .icor-sqlv-form-panes { flex-direction: column; }
+  .icor-sqlv-form-side { position: static; width: 100%; }
+  .icor-sqlv-form-fields { max-height: none; overflow: visible; width: 100%; }
+}
+
+.icor-sqlv-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sqlv-s1);
+}
+
+.icor-sqlv-field-label {
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--sqlv-fg-faint);
+}
+
+.icor-sqlv-field-required { color: var(--sqlv-fg-dim); text-transform: none; letter-spacing: 0; }
+
+.icor-sqlv-field-optional { text-transform: none; letter-spacing: 0; }
+
+/* The picker: a field that expands its searchable list inline. */
+button.icor-sqlv-picker {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sqlv-s2);
+  width: 100%;
+  text-align: left;
+  background: var(--sqlv-input);
+  color: var(--sqlv-fg);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-subtle);
+  font-family: var(--sqlv-font-body);
+  font-size: 13px;
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  cursor: pointer;
+}
+
+button.icor-sqlv-picker.is-empty { color: var(--sqlv-fg-faint); }
+
+button.icor-sqlv-picker:hover { border-color: var(--sqlv-hairline-strong); }
+
+button.icor-sqlv-picker:focus-visible {
+  outline: none;
+  border-color: var(--sqlv-marker);
+  box-shadow: 0 0 0 1px var(--sqlv-marker-border);
+}
+
+.icor-sqlv-picker-chev { color: var(--sqlv-fg-faint); flex: 0 0 auto; }
+
+.icor-sqlv-picker-panel {
+  border: 1px solid var(--sqlv-hairline);
+  border-radius: var(--sqlv-r-subtle);
+  padding: var(--sqlv-s2);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sqlv-s2);
+  max-height: 240px;
+  overflow-y: auto;
+  background: var(--sqlv-overlay);
+}
+
+/* Filter rows: column, condition, value, remove. */
+.icor-sqlv-filter-rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sqlv-s2);
+}
+
+.icor-sqlv-filter-row-edit {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sqlv-s2);
+}
+
+.icor-sqlv-filter-row-edit select.dropdown {
+  background-color: var(--sqlv-well);
+  color: var(--sqlv-fg-dim);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-subtle);
+  font-size: 13px;
+  max-width: 40%;
+}
+
+.icor-sqlv-filter-row-edit .icor-sqlv-wizard-input { flex: 1 1 8em; min-width: 6em; width: auto; }
+
+.icor-sqlv-filter-row-edit button.icor-sqlv-picker { flex: 1 1 8em; width: auto; }
+
+button.icor-sqlv-add-filter { align-self: flex-start; }
+
+.icor-sqlv-form select.dropdown {
+  background-color: var(--sqlv-well);
+  color: var(--sqlv-fg-dim);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-subtle);
+  box-shadow: none;
+  font-family: var(--sqlv-font-body);
+  font-size: 13px;
+  width: 100%;
+}
+
+.icor-sqlv-form select.dropdown:focus-visible { outline: 2px solid var(--sqlv-marker); outline-offset: 2px; }
+
+/* Advanced: one quiet unfold at the bottom. */
+.icor-sqlv-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sqlv-s2);
+  border-top: 1px solid var(--sqlv-hairline-subtle);
+  padding-top: var(--sqlv-s2);
+}
+
+button.icor-sqlv-advanced-toggle {
+  all: unset;
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--sqlv-fg-faint);
+  cursor: pointer;
+}
+
+button.icor-sqlv-advanced-toggle:hover { color: var(--sqlv-fg-dim); }
+
+button.icor-sqlv-advanced-toggle:focus-visible { outline: 2px solid var(--sqlv-marker); outline-offset: 2px; }
+
+.icor-sqlv-sql-pre {
+  margin: 0;
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-dim);
+  background: var(--sqlv-input);
+  border: 1px solid var(--sqlv-hairline);
+  border-radius: var(--sqlv-r-subtle);
+  padding: var(--sqlv-s2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The comparison badge: the color says whether the direction is good for
+ * THIS metric, never simply whether the number rose. */
+.icor-sqlv-delta {
+  display: inline-flex;
+  align-items: center;
+  margin-left: var(--sqlv-s2);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px var(--sqlv-s2);
+  border-radius: var(--sqlv-r-pill);
+  vertical-align: middle;
+}
+
+.icor-sqlv-delta.is-good {
+  color: var(--ink-success-text, var(--color-green));
+  border: 1px solid var(--ink-success, var(--color-green));
+}
+
+.icor-sqlv-delta.is-bad {
+  color: var(--sqlv-destructive-text);
+  border: 1px solid var(--sqlv-destructive);
+}
+
+.icor-sqlv-delta.is-flat {
+  color: var(--sqlv-fg-faint);
+  border: 1px solid var(--sqlv-hairline);
+}
+
+/* The prior period is a dotted ghost: another time, a state. */
+.icor-sqlv-ghost { opacity: 1; }
+
 /* ---------------------------------------------------------- JSON view -- */
 
 .icor-sqlv-json {

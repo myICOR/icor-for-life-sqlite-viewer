@@ -416,18 +416,31 @@ function parseDashboardSpec(text) {
       const check = checkWidgetSource(t.source, t.viz, at);
       if (!check.ok) return check;
       if (!t.source.database && !database) return { ok: false, reason: at + ' needs a database, on the widget or on the dashboard.' };
+      const compare = t.compare === undefined ? 'none' : t.compare;
+      if (!['none', 'previous', 'last_year'].includes(compare)) {
+        return { ok: false, reason: at + ': "compare" must be none, previous or last_year.' };
+      }
+      if (compare !== 'none' && t.source.series) {
+        return { ok: false, reason: at + ': a widget split into series cannot also compare periods. Remove the dimension or the comparison.' };
+      }
+      const favorable = t.favorable === undefined ? 'up' : t.favorable;
+      if (favorable !== 'up' && favorable !== 'down') {
+        return { ok: false, reason: at + ': "favorable" must be "up" or "down" (which direction counts as good).' };
+      }
       tiles.push({
         title: typeof t.title === 'string' ? t.title : '',
         viz: t.viz,
         unit: typeof t.unit === 'string' ? t.unit : '',
         stack: t.stack === true,
         layout,
+        compare,
+        favorable,
         source: {
           database: t.source.database ? normalizePath(t.source.database) : '',
           table: t.source.table,
           metric: typeof t.source.metric === 'string' ? t.source.metric : '',
           agg: check.agg,
-          filter: t.source.filter ? { column: t.source.filter.column, value: String(t.source.filter.value) } : undefined,
+          filters: check.filters,
           series: t.source.series || undefined,
           groupBy: t.source.groupBy || undefined,
           timeColumn: t.source.timeColumn || undefined,
@@ -495,13 +508,21 @@ function specToJson(spec) {
     if (t.unit) tile.unit = t.unit;
     if (t.stack) tile.stack = true;
     if (t.layout) tile.layout = { x: t.layout.x, y: t.layout.y, w: t.layout.w, h: t.layout.h };
+    if (t.compare && t.compare !== 'none') tile.compare = t.compare;
+    if (t.favorable && t.favorable !== 'up') tile.favorable = t.favorable;
     if (t.source) {
       const s = {};
       if (t.source.database) s.database = t.source.database;
       s.table = t.source.table;
       if (t.source.metric) s.metric = t.source.metric;
       s.agg = t.source.agg;
-      if (t.source.filter) s.filter = { column: t.source.filter.column, value: t.source.filter.value };
+      if (t.source.filters && t.source.filters.length) {
+        s.filters = t.source.filters.map((row) => {
+          const out = { column: row.column, op: row.op };
+          if (row.value !== undefined) out.value = row.value;
+          return out;
+        });
+      }
       if (t.source.series) s.series = t.source.series;
       if (t.source.groupBy) s.groupBy = t.source.groupBy;
       if (t.source.timeColumn) s.timeColumn = t.source.timeColumn;
@@ -650,34 +671,90 @@ function resolveTimeframe(tf, globalTf) {
   return tf;
 }
 
+/* The filter operators, in plain words. Each maps one filter row to one
+ * SQL condition, always through quoteIdent and quoteLiteral. */
+const FILTER_OPS = {
+  eq: { label: 'is', sql: (c, v) => quoteIdent(c) + ' = ' + quoteLiteral(v) },
+  ne: { label: 'is not', sql: (c, v) => quoteIdent(c) + ' <> ' + quoteLiteral(v) },
+  contains: { label: 'contains', sql: (c, v) => filterClause(c, v) },
+  not_contains: { label: 'does not contain', sql: (c, v) => 'NOT (' + filterClause(c, v) + ')' },
+  gt: { label: 'greater than', sql: (c, v) => quoteIdent(c) + ' > ' + quoteLiteral(v) },
+  gte: { label: 'at least', sql: (c, v) => quoteIdent(c) + ' >= ' + quoteLiteral(v) },
+  lt: { label: 'less than', sql: (c, v) => quoteIdent(c) + ' < ' + quoteLiteral(v) },
+  lte: { label: 'at most', sql: (c, v) => quoteIdent(c) + ' <= ' + quoteLiteral(v) },
+  empty: { label: 'is empty', noValue: true, sql: (c) => '(' + quoteIdent(c) + " IS NULL OR " + quoteIdent(c) + " = '')" },
+  not_empty: { label: 'is not empty', noValue: true, sql: (c) => '(' + quoteIdent(c) + " IS NOT NULL AND " + quoteIdent(c) + " <> '')" },
+};
+
+function filterConditionOf(row) {
+  const op = FILTER_OPS[row.op || 'eq'];
+  if (!op) return '';
+  return op.sql(row.column, row.value);
+}
+
+/* Every filter row of a source as one AND chain. */
+function filtersCondOf(s) {
+  const rows = Array.isArray(s.filters) ? s.filters : [];
+  return rows.map(filterConditionOf).filter(Boolean).join(' AND ');
+}
+
 /* The WHERE pieces for a timeframe. Presets anchor on the newest row the
  * table has (per filter), not on today, so a chart over a data set that
- * stopped updating still shows its last days instead of nothing. */
-function timeframeConditions({ table, timeColumn, frame, filterCond }) {
+ * stopped updating still shows its last days instead of nothing.
+ * `shift` widens the view backwards: 'previous' is the period before the
+ * current one, 'year' is the same period one year earlier. */
+function timeframeConditions({ table, timeColumn, frame, filterCond, shift }) {
   if (!timeColumn || !frame) return [];
+  const col = quoteIdent(timeColumn);
   if (frame.preset !== undefined) {
     const span = PRESETS[frame.preset];
-    if (!span) return []; /* 'all' */
-    const modifier = span.days ? '-' + span.days + ' day' : '-' + span.months + ' month';
-    const anchor = '(SELECT MAX(' + quoteIdent(timeColumn) + ') FROM ' + quoteIdent(table) + (filterCond ? ' WHERE ' + filterCond : '') + ')';
-    return [quoteIdent(timeColumn) + ' >= date(' + anchor + ", '" + modifier + "')"];
+    if (!span) return []; /* 'all' has no previous period either */
+    const step = span.days ? span.days + ' day' : span.months + ' month';
+    const anchor = '(SELECT MAX(' + col + ') FROM ' + quoteIdent(table) + (filterCond ? ' WHERE ' + filterCond : '') + ')';
+    if (shift === 'previous') {
+      return [
+        col + ' >= date(' + anchor + ", '-" + (span.days ? span.days * 2 + ' day' : span.months * 2 + ' month') + "')",
+        col + ' < date(' + anchor + ", '-" + step + "')",
+      ];
+    }
+    if (shift === 'year') {
+      return [
+        col + ' >= date(' + anchor + ", '-1 year', '-" + step + "')",
+        col + " <= date(" + anchor + ", '-1 year')",
+      ];
+    }
+    return [col + ' >= date(' + anchor + ", '-" + step + "')"];
+  }
+  if (shift === 'previous') {
+    const spanDays = "(julianday(" + quoteLiteral(frame.to) + ") - julianday(" + quoteLiteral(frame.from) + ") + 1)";
+    return [
+      col + ' >= date(' + quoteLiteral(frame.from) + ", '-' || " + spanDays + " || ' day')",
+      col + ' < ' + quoteLiteral(frame.from),
+    ];
+  }
+  if (shift === 'year') {
+    return [
+      col + ' >= date(' + quoteLiteral(frame.from) + ", '-1 year')",
+      col + ' <= date(' + quoteLiteral(frame.to) + ", '-1 year')",
+    ];
   }
   return [
-    quoteIdent(timeColumn) + ' >= ' + quoteLiteral(frame.from),
-    quoteIdent(timeColumn) + ' <= ' + quoteLiteral(frame.to),
+    col + ' >= ' + quoteLiteral(frame.from),
+    col + ' <= ' + quoteLiteral(frame.to),
   ];
 }
 
 /* Descriptor to SQL. Charts come back as (x[, series], value); stats as a
  * single value row. Pure and deterministic: the same descriptor and the
- * same global range always produce the same string. */
-function sqlForWidget(tile, globalTf) {
+ * same global range always produce the same string. `shift` produces the
+ * comparison period's twin query. */
+function sqlForWidget(tile, globalTf, shift) {
   const s = tile.source;
   const table = quoteIdent(s.table);
-  const filterCond = s.filter ? quoteIdent(s.filter.column) + ' = ' + quoteLiteral(s.filter.value) : '';
+  const filterCond = filtersCondOf(s);
   const conds = filterCond ? [filterCond] : [];
   const frame = resolveTimeframe(s.timeframe, globalTf);
-  conds.push(...timeframeConditions({ table: s.table, timeColumn: s.timeColumn, frame, filterCond }));
+  conds.push(...timeframeConditions({ table: s.table, timeColumn: s.timeColumn, frame, filterCond, shift }));
   const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
 
   if (tile.viz === 'stat') {
@@ -766,10 +843,22 @@ function checkWidgetSource(s, viz, at) {
   if (!AGGS[agg]) return { ok: false, reason: at + ': "agg" must be one of sum, avg, min, max, count, latest.' };
   if (agg !== 'count' && (typeof s.metric !== 'string' || !s.metric)) return { ok: false, reason: at + ' needs a "metric" column.' };
   if (agg === 'latest' && viz !== 'stat') return { ok: false, reason: at + ': "latest" only works on a stat widget.' };
-  if (s.filter !== undefined) {
-    if (!s.filter || typeof s.filter.column !== 'string' || !s.filter.column || s.filter.value === undefined) {
-      return { ok: false, reason: at + ': "filter" needs a column and a value.' };
+  const rawFilters = s.filters !== undefined ? s.filters
+    : (s.filter !== undefined ? [Object.assign({ op: 'eq' }, s.filter)] : []);
+  if (!Array.isArray(rawFilters)) return { ok: false, reason: at + ': "filters" must be a list of rows.' };
+  const filters = [];
+  for (const row of rawFilters) {
+    if (!row || typeof row.column !== 'string' || !row.column) {
+      return { ok: false, reason: at + ': every filter row needs a "column".' };
     }
+    const op = row.op === undefined ? 'eq' : row.op;
+    if (!FILTER_OPS[op]) {
+      return { ok: false, reason: at + ': a filter "op" must be one of ' + Object.keys(FILTER_OPS).join(', ') + '.' };
+    }
+    if (!FILTER_OPS[op].noValue && (row.value === undefined || row.value === null)) {
+      return { ok: false, reason: at + ': the filter on ' + row.column + ' needs a "value".' };
+    }
+    filters.push({ column: row.column, op, value: FILTER_OPS[op].noValue ? undefined : String(row.value) });
   }
   if (s.series !== undefined && (typeof s.series !== 'string' || !s.series)) return { ok: false, reason: at + ': "series" must be a column name.' };
   if (s.series && viz === 'stat') return { ok: false, reason: at + ': a stat widget cannot be split into series.' };
@@ -778,7 +867,7 @@ function checkWidgetSource(s, viz, at) {
   if (!validTimeframe(s.timeframe, true)) return { ok: false, reason: at + ': "timeframe" must be "global", a preset like {"preset":"90d"}, or {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}.' };
   if (viz !== 'stat' && !s.groupBy && !s.timeColumn) return { ok: false, reason: at + ' needs a "groupBy" or a "timeColumn" to chart over.' };
   if (s.database !== undefined && (typeof s.database !== 'string' || !s.database)) return { ok: false, reason: at + ': "database" must be a vault path.' };
-  return { ok: true, agg };
+  return { ok: true, agg, filters };
 }
 
 /* Column-type helpers for the picker and the catalog. */
@@ -906,6 +995,69 @@ function normalizeLayout(tiles, cols) {
  * dashboard at rest is widgets and nothing else. */
 function showAddTile(tileCount, editMode) {
   return tileCount === 0 || editMode === true;
+}
+
+/* --------------------------------------------------- comparison rules -- */
+
+const COMPARE_LABELS = { none: 'No comparison', previous: 'Previous period', last_year: 'Same period last year' };
+
+/* A widget can compare periods only when it has a time column, a bounded
+ * frame, and no series split. */
+function canCompare(tile, globalTf) {
+  const s = tile.source;
+  if (!s || !s.timeColumn || s.series) return false;
+  const frame = resolveTimeframe(s.timeframe, globalTf);
+  return !(frame.preset === 'all');
+}
+
+/* The comparison badge, and which direction is good. Good is a property
+ * of the metric, never of the sign: weight going down is a win. */
+function deltaBadge(current, previous, favorable) {
+  if (current === null || current === undefined || current === '') return null;
+  if (previous === null || previous === undefined || previous === '') return null;
+  const cur = Number(current);
+  const prev = Number(previous);
+  if (!Number.isFinite(cur) || !Number.isFinite(prev)) return null;
+  const diff = cur - prev;
+  const direction = diff > 0 ? 'up' : (diff < 0 ? 'down' : 'flat');
+  let label;
+  if (prev === 0) label = diff === 0 ? '0%' : (diff > 0 ? '+' : '-') + '100%';
+  else {
+    const pct = Math.round((diff / Math.abs(prev)) * 1000) / 10;
+    label = (pct > 0 ? '+' : '') + formatNumber(pct) + '%';
+  }
+  const good = direction === 'flat' ? null : (direction === (favorable === 'down' ? 'down' : 'up'));
+  return { direction, label, good, diff };
+}
+
+/* The preview gate as a state machine: a widget that never previewed
+ * green does not save. Only 'ok' unlocks Save; any change makes the
+ * preview stale again. */
+function nextPreviewState(state, event) {
+  if (event === 'change') return 'stale';
+  if (event === 'run') return 'running';
+  if (event === 'ok') return state === 'running' ? 'ok' : state;
+  if (event === 'error') return state === 'running' ? 'error' : state;
+  return state;
+}
+
+function canSave(previewState) { return previewState === 'ok'; }
+
+/* Size presets for the form: names a member can pick without thinking in
+ * grid cells. */
+const SIZE_PRESETS = {
+  small: { label: 'Small (a square)', w: 1, h: 1 },
+  medium: { label: 'Medium', w: 2, h: 2 },
+  wide: { label: 'Wide', w: 3, h: 2 },
+  large: { label: 'Large', w: 3, h: 3 },
+};
+
+function sizePresetOf(layout) {
+  if (!layout) return '';
+  for (const [key, p] of Object.entries(SIZE_PRESETS)) {
+    if (p.w === layout.w && p.h === layout.h) return key;
+  }
+  return '';
 }
 
 /* ========================================================================
@@ -1221,7 +1373,29 @@ function barPath(x, y, w, h, r) {
     ' V ' + (y + h).toFixed(1) + ' Z';
 }
 
-function renderLineChart(parentEl, table, tile) {
+/* The prior period as a dotted ghost, aligned point-for-point with the
+ * current period. Dots mean "another time", a state, not a category. */
+function drawGhost(svg, ghost, { xOf, yOf, scale, color }) {
+  if (!ghost || !ghost.rows || !ghost.rows.length) return;
+  const vi = columnIndex(ghost.columns, 'value');
+  if (vi < 0) return;
+  let d = '';
+  ghost.rows.forEach((row, i) => {
+    const v = Number(row[vi]);
+    if (!Number.isFinite(v)) return;
+    const y = Math.max(PAD.top, Math.min(yOf(scale.min), yOf(v)));
+    d += (d ? ' L ' : 'M ') + xOf(i).toFixed(1) + ' ' + y.toFixed(1);
+  });
+  if (!d) return;
+  const path = svgEl('path', {
+    d, fill: 'none', 'stroke-width': 1.5, 'stroke-linecap': 'round',
+    'stroke-dasharray': '2 4', class: 'icor-sqlv-ghost',
+  });
+  path.setAttribute('stroke', color);
+  svg.appendChild(path);
+}
+
+function renderLineChart(parentEl, table, tile, extras) {
   const xIdx = columnIndex(table.columns, tile.x);
   const seriesNames = tile.y.filter((c) => columnIndex(table.columns, c) >= 0);
   const seriesIdx = seriesNames.map((c) => columnIndex(table.columns, c));
@@ -1231,6 +1405,11 @@ function renderLineChart(parentEl, table, tile) {
   }
   const values = [];
   for (const row of table.rows) for (const i of seriesIdx) { const v = Number(row[i]); if (Number.isFinite(v)) values.push(v); }
+  const ghost = extras && extras.ghost;
+  if (ghost && ghost.rows) {
+    const vi = columnIndex(ghost.columns || [], 'value');
+    if (vi >= 0) for (const row of ghost.rows) { const v = Number(row[vi]); if (Number.isFinite(v)) values.push(v); }
+  }
   /* A snug axis: a heart rate line living between 60 and 90 should use the
    * whole plot, not hover above an empty run down to zero. */
   const scale = niceScale(Math.min(...values), Math.max(...values), 5);
@@ -1255,6 +1434,7 @@ function renderLineChart(parentEl, table, tile) {
     path.setAttribute('stroke', palette[s]);
     svg.appendChild(path);
   });
+  if (ghost) drawGhost(svg, ghost, { xOf, yOf, scale, color: palette[0] });
 
   /* Hover: the pen points. A solid marker guide, marker dots on the
    * hovered points, and the values on a small chip. */
@@ -1309,7 +1489,7 @@ function renderLineChart(parentEl, table, tile) {
   legendFor(parentEl, seriesNames, palette);
 }
 
-function renderBarChart(parentEl, table, tile) {
+function renderBarChart(parentEl, table, tile, extras) {
   const xIdx = columnIndex(table.columns, tile.x);
   const seriesNames = tile.y.filter((c) => columnIndex(table.columns, c) >= 0);
   const seriesIdx = seriesNames.map((c) => columnIndex(table.columns, c));
@@ -1336,6 +1516,7 @@ function renderBarChart(parentEl, table, tile) {
     String(xLabels[rowI]) + ' · ' + seriesNames[s] + ' ' + formatNumber(v) + (tile.unit ? ' ' + tile.unit : '');
 
   const palette = seriesPaletteFor(seriesIdx.length);
+  const ghost = extras && extras.ghost;
   if (stacked) {
     const stacks = stackRows(table.rows, seriesIdx);
     stacks.forEach((segs, rowI) => {
@@ -1378,10 +1559,14 @@ function renderBarChart(parentEl, table, tile) {
       });
     });
   }
+  if (ghost) {
+    const xOfBar = (i) => PAD.left + i * slot + slot / 2;
+    drawGhost(svg, ghost, { xOf: xOfBar, yOf, scale, color: 'var(--sqlv-fg-dim)' });
+  }
   legendFor(parentEl, seriesNames, palette);
 }
 
-function renderStatTile(parentEl, table, tile) {
+function renderStatTile(parentEl, table, tile, extras) {
   const { value, caption } = statOf(table, tile);
   const wrap = parentEl.createDiv({ cls: 'icor-sqlv-stat' });
   if (value === null || value === undefined) {
@@ -1391,6 +1576,19 @@ function renderStatTile(parentEl, table, tile) {
   const line = wrap.createDiv({ cls: 'icor-sqlv-stat-value' });
   line.createSpan({ text: formatNumber(typeof value === 'string' ? value : Number(value)) });
   if (tile.unit) line.createSpan({ cls: 'icor-sqlv-stat-unit', text: ' ' + tile.unit });
+  /* The comparison badge: the triangle points where the number went; the
+   * color says whether that direction is good FOR THIS metric. */
+  if (extras && extras.ghost && extras.ghost.rows && extras.ghost.rows.length) {
+    const prev = extras.ghost.rows[0][0];
+    const badge = deltaBadge(value, prev, extras.favorable);
+    if (badge) {
+      const cls = badge.good === null ? 'is-flat' : (badge.good ? 'is-good' : 'is-bad');
+      const pill = line.createSpan({ cls: 'icor-sqlv-delta ' + cls });
+      pill.createSpan({ text: (badge.direction === 'up' ? '▲ ' : badge.direction === 'down' ? '▼ ' : '') + badge.label });
+      pill.setAttribute('aria-label', 'Compared with the ' + (extras.compare === 'last_year' ? 'same period last year' : 'previous period') + ': ' + badge.label);
+      pill.setAttribute('title', 'vs ' + formatNumber(Number(prev)) + (tile.unit ? ' ' + tile.unit : ''));
+    }
+  }
   if (caption) wrap.createDiv({ cls: 'icor-sqlv-stat-caption', text: caption });
 }
 
@@ -1414,12 +1612,12 @@ function renderResultTable(parentEl, table, { maxRows } = {}) {
   return scroller;
 }
 
-function renderTile(tileEl, tileSpec, table) {
+function renderTile(tileEl, tileSpec, table, extras) {
   if (tileSpec.title) tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
   const body = tileEl.createDiv({ cls: 'icor-sqlv-tile-body' });
-  if (tileSpec.viz === 'stat') renderStatTile(body, table, tileSpec);
-  else if (tileSpec.viz === 'line') renderLineChart(body, table, tileSpec);
-  else if (tileSpec.viz === 'bar') renderBarChart(body, table, tileSpec);
+  if (tileSpec.viz === 'stat') renderStatTile(body, table, tileSpec, extras);
+  else if (tileSpec.viz === 'line') renderLineChart(body, table, tileSpec, extras);
+  else if (tileSpec.viz === 'bar') renderBarChart(body, table, tileSpec, extras);
   else renderResultTable(body, table, { maxRows: 50 });
 }
 
@@ -1996,7 +2194,7 @@ class SqliteDashboardsView extends ItemView {
     const plus = add.createDiv({ cls: 'icor-sqlv-add-plus' });
     setIcon(plus, 'plus');
     add.createDiv({ cls: 'icor-sqlv-add-text', text: 'Add widget' });
-    const start = () => new WidgetWizard(this.plugin, this, gs.spec, -1).open();
+    const start = () => new WidgetFormModal(this.plugin, this, gs.spec, -1).open();
     add.addEventListener('click', start);
     add.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); start(); } });
     gs.addEl = add;
@@ -2200,8 +2398,7 @@ class SqliteDashboardsView extends ItemView {
     edit.setAttribute('aria-label', 'Edit this widget');
     edit.setAttribute('title', 'Edit');
     edit.addEventListener('click', () => {
-      if (tile.source) new WidgetWizard(this.plugin, this, spec, index).open();
-      else new RawTileModal(this.plugin, this, spec, index).open();
+      new WidgetFormModal(this.plugin, this, spec, index).open();
     });
     const remove = actions.createEl('button', { cls: 'icor-sqlv-tile-action' });
     setIcon(remove, 'trash-2');
@@ -2257,9 +2454,16 @@ class SqliteDashboardsView extends ItemView {
         try {
           const sql = tileSql(tile, spec);
           const res = await this.plugin.query.query(db, sql, { cap: 5000 });
+          /* The comparison period rides as a second, twin query. */
+          let ghost = null;
+          if (tile.source && tile.compare && tile.compare !== 'none' && canCompare(tile, spec.globalTimeframe)) {
+            const shift = tile.compare === 'last_year' ? 'year' : 'previous';
+            const ghostRes = await this.plugin.query.query(db, sqlForWidget(tile, spec.globalTimeframe, shift), { cap: 5000 });
+            ghost = { columns: ghostRes.columns, rows: ghostRes.rows };
+          }
           const prepared = prepareTileForRender(tile, res);
-          renderTile(tileEl, prepared.spec, prepared.table);
-          cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows }));
+          renderTile(tileEl, prepared.spec, prepared.table, { ghost, compare: tile.compare, favorable: tile.favorable });
+          cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows, ghost }));
           this.plugin.maybeWriteCatalog(db);
         } catch (e) {
           failed++;
@@ -2273,7 +2477,7 @@ class SqliteDashboardsView extends ItemView {
       if (cachedTile) {
         try {
           const prepared = prepareTileForRender(cachedTile, { columns: cachedTile.columns, rows: cachedTile.rows });
-          renderTile(tileEl, prepared.spec, prepared.table);
+          renderTile(tileEl, prepared.spec, prepared.table, { ghost: cachedTile.ghost || null, compare: cachedTile.compare, favorable: cachedTile.favorable });
           tileEl.createDiv({ cls: 'icor-sqlv-note', text: 'Computed on desktop, ' + relativeTime(cache.computedAt) + '.' });
           fromCache++;
         } catch (e) {
@@ -2335,11 +2539,82 @@ class ConfirmModal extends Modal {
   onClose() { this.contentEl.empty(); }
 }
 
-/* THE WIDGET WIZARD. One question per screen, plain words, touch-sized
- * rows: database, table, what to measure, how to add it up, how to split
- * it, when, how it should look. Editing an existing widget starts with its
- * answers filled in. */
-class WidgetWizard extends Modal {
+/* ------------------------------------------------- the widget form -- */
+
+/* A cancelable delay with injected timers, so the preview debounce is a
+ * pure mechanism the gates can drive with fake clocks. */
+function makeDebounce(ms, schedule, cancel) {
+  let handle = null;
+  return {
+    bump(fn) {
+      if (handle !== null) cancel(handle);
+      handle = schedule(() => { handle = null; fn(); }, ms);
+    },
+    stop() { if (handle !== null) { cancel(handle); handle = null; } },
+  };
+}
+
+/* The shared searchable list (the 0.3.0 component, now standalone):
+ * search on top for long lists, grouped rows, arrows and Enter. */
+function searchList(body, { items, search = true, autofocus = true, placeholder = 'Type to narrow the list' }) {
+  let input = null;
+  if (search && items.length > 4) {
+    input = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-search' });
+    input.setAttribute('placeholder', placeholder);
+    input.setAttribute('aria-label', placeholder);
+  }
+  const host = body.createDiv({ cls: 'icor-sqlv-wizard-listhost' });
+  let active = -1;
+  let visible = [];
+  const draw = () => {
+    host.empty();
+    const needle = input ? input.value.trim() : '';
+    visible = items.filter((item) => matchesNeedle(needle, item.label, item.detail));
+    if (active >= visible.length) active = visible.length - 1;
+    let lastGroup;
+    let listEl = null;
+    visible.forEach((item, i) => {
+      if (item.group !== lastGroup || !listEl) {
+        if (item.group && item.group !== lastGroup) host.createDiv({ cls: 'icor-sqlv-wizard-group', text: item.group });
+        listEl = host.createDiv({ cls: 'icor-sqlv-wizard-list' });
+        lastGroup = item.group;
+      }
+      const rowEl = listEl.createDiv({ cls: 'icor-sqlv-wizard-row' + (item.selected ? ' is-selected' : '') + (i === active ? ' is-keyboard' : '') });
+      rowEl.setAttribute('role', 'button');
+      rowEl.setAttribute('tabindex', '0');
+      rowEl.createDiv({ cls: 'icor-sqlv-wizard-row-label', text: item.label });
+      if (item.detail) rowEl.createDiv({ cls: 'icor-sqlv-wizard-row-detail', text: item.detail });
+      const pick = () => item.onPick();
+      rowEl.addEventListener('click', pick);
+      rowEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+    });
+    if (!visible.length) host.createDiv({ cls: 'icor-sqlv-empty', text: 'Nothing matches.' });
+  };
+  if (input) {
+    input.addEventListener('input', () => { active = -1; draw(); });
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'ArrowDown') { ev.preventDefault(); active = Math.min(visible.length - 1, active + 1); draw(); }
+      else if (ev.key === 'ArrowUp') { ev.preventDefault(); active = Math.max(0, active - 1); draw(); }
+      else if (ev.key === 'Enter') {
+        ev.preventDefault();
+        const pick = visible[Math.max(0, active)] || visible[0];
+        if (pick) pick.onPick();
+      }
+    });
+  }
+  draw();
+  if (input && autofocus && typeof input.focus === 'function') input.focus();
+  return { input };
+}
+
+/* THE WIDGET FORM. One settings page that reads top to bottom like a
+ * sentence: which database, which table, which value, when, split by
+ * what, narrowed how, added up how, compared with what, called what,
+ * drawn how, how big, over which period. A live preview runs beside it
+ * through the normal read-only engines, and only a green preview can
+ * save. SQL is optional and folded away under Advanced; turning a
+ * widget into plain SQL is a one-way door and says so. */
+class WidgetFormModal extends Modal {
   constructor(plugin, view, spec, editIndex) {
     super(plugin.app);
     this.plugin = plugin;
@@ -2347,480 +2622,600 @@ class WidgetWizard extends Modal {
     this.spec = spec;
     this.editIndex = editIndex;
     const existing = editIndex >= 0 ? spec.tiles[editIndex] : null;
-    const src = existing && existing.source ? existing.source : {};
+    const src = existing && existing.source ? existing.source : null;
     this.state = {
-      database: src.database || spec.database || '',
-      table: src.table || '',
-      metric: src.metric || '',
-      agg: src.agg || 'sum',
-      filter: src.filter ? { column: src.filter.column, value: src.filter.value } : null,
-      series: src.series || '',
-      timeColumn: src.timeColumn || '',
-      timeframe: existing ? (src.timeframe === undefined ? 'global' : src.timeframe) : 'global',
+      mode: existing && !existing.source ? 'sql' : 'form',
+      database: (src && src.database) || spec.database || '',
+      table: (src && src.table) || '',
+      metric: (src && src.metric) || '',
+      agg: (src && src.agg) || 'sum',
+      series: (src && src.series) || '',
+      timeColumn: (src && src.timeColumn) || '',
+      timeframe: src ? (src.timeframe === undefined ? 'global' : src.timeframe) : 'global',
+      filters: src && src.filters ? src.filters.map((f) => Object.assign({}, f)) : [],
+      compare: (existing && existing.compare) || 'none',
+      favorable: (existing && existing.favorable) || 'up',
       viz: existing ? existing.viz : 'line',
       stack: existing ? !!existing.stack : false,
       title: existing ? existing.title : '',
       unit: existing ? existing.unit : '',
+      sizeKey: existing && existing.layout ? sizePresetOf(existing.layout) : (existing ? '' : 'medium'),
+      sqlText: existing && existing.sql ? existing.sql : '',
+      x: existing && existing.x ? existing.x : 'x',
+      y: existing && existing.y && existing.y.length ? existing.y.join(', ') : 'value',
+      advancedOpen: false,
     };
-    this.schema = null; /* { live, tables } for state.database */
-    this.step = 'database';
+    this.schema = null;
+    this.schemaFor = '';
+    this.openPicker = '';
+    this.previewState = 'stale';
+    this.previewError = '';
+    this.previewSeq = 0;
+    this.debounce = makeDebounce(400, (fn, ms) => setTimeout(fn, ms), (h) => clearTimeout(h));
   }
 
   onOpen() {
     this.modalEl.addClass('icor-sqlv-wizard-modal');
+    this.modalEl.addClass('icor-sqlv-form-modal');
     this.modalEl.setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
-    this.renderStep();
-  }
-  onClose() { this.contentEl.empty(); }
-
-  tableInfo() { return this.schema ? this.schema.tables.find((t) => t.name === this.state.table) : null; }
-
-  /* THE ONE LIST every wizard step uses: an optional search field on top
-   * (type to narrow, any word, anywhere in the name, case does not
-   * matter), grouped rows, and a keyboard: arrows move, Enter picks. */
-  list(body, { items, search = true, autofocus = true, placeholder = 'Type to narrow the list' }) {
-    let input = null;
-    if (search && items.length > 4) {
-      input = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-search' });
-      input.setAttribute('placeholder', placeholder);
-      input.setAttribute('aria-label', placeholder);
-    }
-    const host = body.createDiv({ cls: 'icor-sqlv-wizard-listhost' });
-    let active = -1;
-    let visible = [];
-    const draw = () => {
-      host.empty();
-      const needle = input ? input.value.trim() : '';
-      visible = items.filter((item) => matchesNeedle(needle, item.label, item.detail));
-      if (active >= visible.length) active = visible.length - 1;
-      let lastGroup;
-      let listEl = null;
-      visible.forEach((item, i) => {
-        if (item.group !== lastGroup || !listEl) {
-          if (item.group && item.group !== lastGroup) host.createDiv({ cls: 'icor-sqlv-wizard-group', text: item.group });
-          if (item.group !== lastGroup || !listEl) listEl = host.createDiv({ cls: 'icor-sqlv-wizard-list' });
-          lastGroup = item.group;
-        }
-        const rowEl = this.row(listEl, item);
-        if (i === active) rowEl.addClass('is-keyboard');
-        item.el = rowEl;
-      });
-      if (!visible.length) host.createDiv({ cls: 'icor-sqlv-empty', text: 'Nothing matches.' });
-    };
-    if (input) {
-      input.addEventListener('input', () => { active = -1; draw(); });
-      input.addEventListener('keydown', (ev) => {
-        if (ev.key === 'ArrowDown') { ev.preventDefault(); active = Math.min(visible.length - 1, active + 1); draw(); }
-        else if (ev.key === 'ArrowUp') { ev.preventDefault(); active = Math.max(0, active - 1); draw(); }
-        else if (ev.key === 'Enter') {
-          ev.preventDefault();
-          const pick = visible[Math.max(0, active)] || visible[0];
-          if (pick) pick.onPick();
-        }
-      });
-    }
-    draw();
-    if (input && autofocus && typeof input.focus === 'function') input.focus();
-    return { input };
-  }
-
-  /* One tappable row in a wizard list. */
-  row(listEl, { label, detail, onPick, selected }) {
-    const row = listEl.createDiv({ cls: 'icor-sqlv-wizard-row' + (selected ? ' is-selected' : '') });
-    row.setAttribute('role', 'button');
-    row.setAttribute('tabindex', '0');
-    row.createDiv({ cls: 'icor-sqlv-wizard-row-label', text: label });
-    if (detail) row.createDiv({ cls: 'icor-sqlv-wizard-row-detail', text: detail });
-    const pick = () => onPick();
-    row.addEventListener('click', pick);
-    row.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
-    return row;
-  }
-
-  frame({ heading, sub, back }) {
     this.titleEl.setText(this.editIndex >= 0 ? 'Edit widget' : 'New widget');
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.addClass('icor-sqlv-wizard');
-    const crumbs = [];
-    if (this.state.database) crumbs.push(baseName(this.state.database));
-    if (this.state.table) crumbs.push(this.state.table);
-    if (this.state.filter) crumbs.push(this.state.filter.value);
-    else if (this.state.metric && this.step !== 'measure') crumbs.push(this.state.metric);
-    if (crumbs.length) contentEl.createDiv({ cls: 'icor-sqlv-wizard-crumbs', text: crumbs.join('  ›  ') });
-    contentEl.createDiv({ cls: 'icor-sqlv-wizard-heading', text: heading });
-    if (sub) contentEl.createDiv({ cls: 'icor-sqlv-note', text: sub });
-    const body = contentEl.createDiv({ cls: 'icor-sqlv-wizard-body' });
+    contentEl.addClass('icor-sqlv-form');
+    const panes = contentEl.createDiv({ cls: 'icor-sqlv-form-panes' });
+    this.formEl = panes.createDiv({ cls: 'icor-sqlv-form-fields' });
+    const side = panes.createDiv({ cls: 'icor-sqlv-form-side' });
+    side.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Preview' });
+    this.previewEl = side.createDiv({ cls: 'icor-sqlv-form-preview' });
+    this.previewNote = side.createDiv({ cls: 'icor-sqlv-note' });
     const bar = contentEl.createDiv({ cls: 'icor-sqlv-console-bar icor-sqlv-modal-bar' });
-    if (back) {
-      const b = bar.createEl('button', { text: 'Back' });
-      b.addEventListener('click', () => { this.step = back; this.renderStep(); });
-    }
+    this.saveBtn = bar.createEl('button', { text: this.editIndex >= 0 ? 'Save widget' : 'Add widget', cls: 'mod-cta' });
+    this.saveBtn.addEventListener('click', () => this.save());
     const cancel = bar.createEl('button', { text: 'Cancel' });
     cancel.addEventListener('click', () => this.close());
-    return { body, bar };
+    this.renderForm();
+    this.touch();
   }
 
-  fail(body, e) {
-    body.empty();
-    body.createDiv({ cls: 'icor-sqlv-error', text: String((e && e.message) || e) });
+  onClose() {
+    this.debounce.stop();
+    this.contentEl.empty();
   }
 
-  renderStep() {
-    const step = this.step;
-    if (step === 'database') this.stepDatabase();
-    else if (step === 'table') this.stepTable();
-    else if (step === 'measure') this.stepMeasure();
-    else if (step === 'value') this.stepValue();
-    else if (step === 'metric-for-filter') this.stepMetricForFilter();
-    else if (step === 'agg') this.stepAgg();
-    else if (step === 'series') this.stepSeries();
-    else if (step === 'time') this.stepTime();
-    else this.stepLook();
+  /* Any change makes the preview stale and re-arms the debounce. */
+  touch() {
+    this.previewState = nextPreviewState(this.previewState, 'change');
+    this.syncGate();
+    this.debounce.bump(() => this.runPreview());
   }
 
-  stepDatabase() {
-    const { body } = this.frame({ heading: 'Which database?' });
-    const dbs = this.plugin.vaultDatabases();
-    if (!dbs.length) { body.createDiv({ cls: 'icor-sqlv-note', text: 'No databases found in this vault.' }); return; }
-    this.list(body, {
-      placeholder: 'Type to find a database',
-      items: dbs.map((db) => ({
-        label: baseName(db.path),
-        detail: db.path + '  ·  ' + formatBytes(db.size),
-        selected: db.path === this.state.database,
-        onPick: () => {
-          this.state.database = db.path;
-          this.state.table = '';
-          this.schema = null;
-          this.step = 'table';
-          this.renderStep();
-        },
-      })),
-    });
-  }
-
-  async stepTable() {
-    const { body } = this.frame({ heading: 'Which table?', back: 'database' });
-    body.createDiv({ cls: 'icor-sqlv-note', text: 'Reading the schema …' });
-    try {
-      if (!this.schema) this.schema = await this.plugin.schemaFor(this.state.database);
-    } catch (e) { this.fail(body, e); return; }
-    if (this.step !== 'table') return;
-    body.empty();
-    if (!this.schema.live) {
-      body.createDiv({ cls: 'icor-sqlv-note', text: 'This database cannot be opened on this device; the picker uses the catalog the desktop wrote ' + (this.schema.computedAt ? relativeTime(this.schema.computedAt) : '') + '. The widget will show data after the next desktop pass.' });
-    }
-    this.list(body, {
-      placeholder: 'Type to find a table',
-      items: this.schema.tables.map((t) => ({
-        label: t.name,
-        detail: t.columns.length + ' columns',
-        selected: t.name === this.state.table,
-        onPick: () => {
-          if (this.state.table !== t.name) { this.state.metric = ''; this.state.filter = null; this.state.series = ''; }
-          this.state.table = t.name;
-          this.state.timeColumn = this.state.timeColumn && t.columns.some((c) => c.name === this.state.timeColumn)
-            ? this.state.timeColumn : guessTimeColumn(t.columns);
-          this.step = 'measure';
-          this.renderStep();
-        },
-      })),
-    });
-  }
-
-  stepMeasure() {
-    const { body } = this.frame({
-      heading: 'What should be measured?',
-      sub: 'Pick a number column, or start from a category to narrow the rows down first.',
-      back: 'table',
-    });
-    const table = this.tableInfo();
-    if (!table) { this.step = 'table'; this.renderStep(); return; }
-    const numbers = table.columns.filter((c) => isNumericType(c.type));
-    const texts = table.columns.filter((c) => isTextType(c.type));
-    const items = [{
-      label: 'Count rows',
-      detail: 'How many rows match',
-      onPick: () => { this.state.metric = ''; this.state.agg = 'count'; this.state.filter = null; this.step = 'series'; this.renderStep(); },
-    }];
-    for (const c of numbers) {
-      items.push({
-        group: 'Numbers',
-        label: c.name,
-        detail: c.type,
-        selected: !this.state.filter && this.state.metric === c.name,
-        onPick: () => { this.state.metric = c.name; this.state.filter = null; if (this.state.agg === 'count') this.state.agg = 'sum'; this.step = 'agg'; this.renderStep(); },
-      });
-    }
-    for (const c of texts) {
-      items.push({
-        group: 'Categories (narrow down first)',
-        label: c.name,
-        detail: 'pick one of its values',
-        selected: !!this.state.filter && this.state.filter.column === c.name,
-        onPick: () => { this.state.filter = { column: c.name, value: '' }; this.step = 'value'; this.renderStep(); },
-      });
-    }
-    this.list(body, { placeholder: 'Type to find a column', items });
-  }
-
-  async stepValue() {
-    const { body } = this.frame({ heading: 'Which ' + this.state.filter.column + '?', back: 'measure' });
-    body.createDiv({ cls: 'icor-sqlv-note', text: 'Reading the values …' });
-    let values;
-    try {
-      values = await this.plugin.distinctValues(this.state.database, this.state.table, this.state.filter.column);
-    } catch (e) { this.fail(body, e); return; }
-    if (this.step !== 'value') return;
-    body.empty();
-    if (values.truncated) body.createDiv({ cls: 'icor-sqlv-note', text: 'Showing the first 200 values.' });
-    this.list(body, {
-      placeholder: 'Type to find a value',
-      items: values.values.map((v) => ({
-        label: v,
-        selected: this.state.filter.value === v,
-        onPick: () => {
-          this.state.filter.value = v;
-          const table = this.tableInfo();
-          const numbers = table.columns.filter((c) => isNumericType(c.type));
-          const preferred = numbers.find((c) => /^(qty|value|amount|n)$/i.test(c.name)) || (numbers.length === 1 ? numbers[0] : null);
-          if (preferred) { this.state.metric = preferred.name; this.step = 'agg'; }
-          else if (!numbers.length) { this.state.metric = ''; this.state.agg = 'count'; this.step = 'series'; }
-          else this.step = 'metric-for-filter';
-          this.renderStep();
-        },
-      })),
-    });
-  }
-
-  stepMetricForFilter() {
-    const { body } = this.frame({ heading: 'Which number should be measured?', back: 'value' });
-    const table = this.tableInfo();
-    this.list(body, {
-      placeholder: 'Type to find a column',
-      items: table.columns.filter((col) => isNumericType(col.type)).map((c) => ({
-        label: c.name,
-        detail: c.type,
-        selected: this.state.metric === c.name,
-        onPick: () => { this.state.metric = c.name; if (this.state.agg === 'count') this.state.agg = 'sum'; this.step = 'agg'; this.renderStep(); },
-      })),
-    });
-  }
-
-  stepAgg() {
-    const { body } = this.frame({
-      heading: 'How should it be added up?',
-      sub: 'When several rows fall on the same point, this decides what the point shows.',
-      back: this.state.filter ? 'value' : 'measure',
-    });
-    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    for (const [agg, label] of Object.entries(AGG_LABELS)) {
-      if (agg === 'count') continue;
-      this.row(list, {
-        label,
-        detail: agg === 'latest' ? 'one number, the newest row (stat only)' : '',
-        selected: this.state.agg === agg,
-        onPick: () => {
-          this.state.agg = agg;
-          if (agg === 'latest') { this.state.viz = 'stat'; this.state.series = ''; }
-          this.step = agg === 'latest' ? 'time' : 'series';
-          this.renderStep();
-        },
-      });
+  syncGate() {
+    if (!this.saveBtn) return;
+    this.saveBtn.disabled = !canSave(this.previewState);
+    if (this.previewNote) {
+      if (this.previewState === 'ok') this.previewNote.setText('The preview ran. Save is open.');
+      else if (this.previewState === 'running') this.previewNote.setText('Running the preview …');
+      else if (this.previewState === 'error') this.previewNote.setText(this.previewError);
+      else this.previewNote.setText('The preview runs after each change; a widget saves only after its preview worked.');
     }
   }
 
-  stepSeries() {
-    const { body } = this.frame({
-      heading: 'Split it into series?',
-      sub: 'One line or bar per value of a category, for example one per workout type.',
-      back: this.state.agg === 'count' ? 'measure' : 'agg',
-    });
-    const table = this.tableInfo();
-    const items = [{
-      label: 'No split',
-      selected: !this.state.series,
-      onPick: () => { this.state.series = ''; this.step = 'time'; this.renderStep(); },
-    }];
-    for (const c of table.columns.filter((col) => isTextType(col.type))) {
-      if (this.state.filter && c.name === this.state.filter.column) continue;
-      items.push({
-        label: 'By ' + c.name,
-        selected: this.state.series === c.name,
-        onPick: () => { this.state.series = c.name; if (this.state.viz === 'stat') this.state.viz = 'bar'; this.step = 'time'; this.renderStep(); },
-      });
-    }
-    this.list(body, { placeholder: 'Type to find a column', items });
+  async ensureSchema() {
+    if (this.schema && this.schemaFor === this.state.database) return this.schema;
+    this.schema = await this.plugin.schemaFor(this.state.database);
+    this.schemaFor = this.state.database;
+    return this.schema;
   }
 
-  stepTime() {
-    const { body } = this.frame({
-      heading: 'When?',
-      sub: 'Which column holds the time, and how far back to look.',
-      back: this.state.agg === 'latest' ? 'agg' : 'series',
-    });
-    const table = this.tableInfo();
-    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Time column' });
-    const timeCandidates = table.columns.filter((c) => isTextType(c.type) || /INT/i.test(String(c.type)));
-    this.list(body, {
-      placeholder: 'Type to find a column',
-      autofocus: false,
-      items: timeCandidates.map((c) => ({
-        label: c.name,
-        selected: this.state.timeColumn === c.name,
-        onPick: () => { this.state.timeColumn = c.name; this.renderStep(); },
-      })),
-    });
-    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Period' });
-    const frameList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    const pickFrame = (tf) => { this.state.timeframe = tf; this.step = 'look'; this.renderStep(); };
-    this.row(frameList, {
-      label: 'Follow the dashboard',
-      detail: 'uses the range picker at the top',
-      selected: this.state.timeframe === 'global',
-      onPick: () => pickFrame('global'),
-    });
-    for (const [key, label] of Object.entries(PRESET_LABELS)) {
-      this.row(frameList, {
-        label,
-        selected: !!(this.state.timeframe && this.state.timeframe.preset === key),
-        onPick: () => pickFrame({ preset: key }),
-      });
-    }
-    const custom = body.createDiv({ cls: 'icor-sqlv-range-custom' });
-    const cur = this.state.timeframe && this.state.timeframe.from ? this.state.timeframe : {};
-    const from = custom.createEl('input', { type: 'date', value: cur.from || '' });
-    from.setAttribute('aria-label', 'From date');
-    const to = custom.createEl('input', { type: 'date', value: cur.to || '' });
-    to.setAttribute('aria-label', 'To date');
-    const apply = custom.createEl('button', { text: 'Use these dates' });
-    apply.addEventListener('click', () => {
-      if (DATE_RE.test(from.value) && DATE_RE.test(to.value)) pickFrame({ from: from.value, to: to.value });
-      else new Notice('Pick both dates first.');
-    });
+  tableInfo() {
+    return this.schema ? this.schema.tables.find((t) => t.name === this.state.table) : null;
   }
 
-  stepLook() {
-    const { body, bar } = this.frame({ heading: 'How should it look?', back: 'time' });
-    const vizList = body.createDiv({ cls: 'icor-sqlv-wizard-list icor-sqlv-viz-list' });
-    const vizOptions = this.state.agg === 'latest'
-      ? [['stat', 'One big number']]
-      : [['line', 'Line chart'], ['bar', 'Bar chart'], ['stat', 'One big number']];
-    for (const [viz, label] of vizOptions) {
-      this.row(vizList, {
-        label,
-        selected: this.state.viz === viz,
-        onPick: () => {
-          this.state.viz = viz;
-          if (viz === 'stat') this.state.series = '';
-          this.renderStep();
-        },
-      });
-    }
-    if (this.state.series && this.state.viz === 'bar') {
-      const stackRow = body.createDiv({ cls: 'icor-sqlv-wizard-toggle' });
-      const cb = stackRow.createEl('input', { type: 'checkbox' });
-      cb.checked = this.state.stack;
-      cb.setAttribute('id', 'icor-sqlv-stack');
-      const lbl = stackRow.createEl('label', { text: 'Stack the series on top of each other' });
-      lbl.setAttribute('for', 'icor-sqlv-stack');
-      cb.addEventListener('change', () => { this.state.stack = cb.checked; });
-    }
-    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Title' });
-    const title = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: this.state.title || this.suggestedTitle() });
-    title.setAttribute('aria-label', 'Widget title');
-    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Unit (optional, shown next to values)' });
-    const unit = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: this.state.unit });
-    unit.setAttribute('placeholder', 'kg, steps, kcal …');
-    unit.setAttribute('aria-label', 'Unit');
-
-    const save = bar.createEl('button', { text: this.editIndex >= 0 ? 'Save widget' : 'Add widget', cls: 'mod-cta' });
-    save.addEventListener('click', async () => {
-      this.state.title = title.value.trim();
-      this.state.unit = unit.value.trim();
-      try {
-        await this.save();
-        this.close();
-      } catch (e) {
-        this.fail(body, e);
+  /* The state as a tile, or a plain-words reason. */
+  buildTile() {
+    const s = this.state;
+    if (s.mode === 'sql') {
+      if (!s.sqlText.trim()) return { ok: false, reason: 'The SQL is empty.' };
+      const gate = gateStatement(s.sqlText);
+      if (!gate.ok) return { ok: false, reason: gate.reason };
+      const y = s.y.split(',').map((v) => v.trim()).filter(Boolean);
+      const tile = {
+        title: s.title || 'SQL widget',
+        sql: s.sqlText,
+        viz: s.viz,
+        x: s.x.trim(),
+        y,
+        unit: s.unit,
+        stack: s.stack && y.length > 1,
+      };
+      if ((tile.viz === 'line' || tile.viz === 'bar') && (!tile.x || !y.length)) {
+        return { ok: false, reason: 'A ' + tile.viz + ' chart needs the x column and at least one y column.' };
       }
-    });
+      return { ok: true, tile };
+    }
+    if (!s.database) return { ok: false, reason: 'Pick a database first.' };
+    if (!s.table) return { ok: false, reason: 'Pick a table.' };
+    if (s.agg !== 'count' && !s.metric) return { ok: false, reason: 'Pick a value to measure.' };
+    const filters = [];
+    for (const row of s.filters) {
+      if (!row.column) continue;
+      if (!FILTER_OPS[row.op || 'eq'].noValue && (row.value === undefined || row.value === '')) {
+        return { ok: false, reason: 'The filter on ' + row.column + ' still needs a value.' };
+      }
+      filters.push({ column: row.column, op: row.op || 'eq', value: row.value });
+    }
+    const source = {
+      table: s.table,
+      metric: s.agg === 'count' ? '' : s.metric,
+      agg: s.agg,
+      filters,
+      series: s.series || undefined,
+      timeColumn: s.timeColumn || undefined,
+      timeframe: s.timeframe,
+    };
+    if (s.database && s.database !== this.spec.database) source.database = s.database;
+    const viz = s.agg === 'latest' ? 'stat' : s.viz;
+    const tile = {
+      title: s.title || this.suggestedTitle(),
+      viz,
+      unit: s.unit,
+      stack: s.stack && !!s.series && viz === 'bar',
+      compare: s.series ? 'none' : s.compare,
+      favorable: s.favorable,
+      source,
+    };
+    if (viz !== 'stat' && !source.timeColumn && !source.groupBy) {
+      return { ok: false, reason: 'A chart needs a date column. Pick one, or choose the stat widget.' };
+    }
+    const check = checkWidgetSource(source, viz, 'This widget');
+    if (!check.ok) return check;
+    source.filters = check.filters;
+    return { ok: true, tile };
   }
 
   suggestedTitle() {
-    const what = this.state.filter ? this.state.filter.value : (this.state.agg === 'count' ? 'Rows' : this.state.metric);
-    const how = this.state.agg === 'count' ? 'count' : (AGG_LABELS[this.state.agg] || '').toLowerCase();
-    return what ? (what + (how && this.state.viz !== 'stat' ? ', ' + how : '')) : 'New widget';
+    const s = this.state;
+    const eq = s.filters.find((f) => f.op === 'eq' && f.value);
+    const what = eq ? eq.value : (s.agg === 'count' ? 'Rows' : s.metric);
+    const how = s.agg === 'count' ? 'count' : (AGG_LABELS[s.agg] || '').toLowerCase();
+    return what ? (what + (how && s.viz !== 'stat' ? ', ' + how : '')) : 'New widget';
+  }
+
+  async runPreview() {
+    const seq = ++this.previewSeq;
+    const built = this.buildTile();
+    if (!built.ok) {
+      this.previewState = 'error';
+      this.previewError = built.reason;
+      this.previewEl.empty();
+      this.syncGate();
+      return;
+    }
+    this.previewState = nextPreviewState(this.previewState, 'run');
+    this.syncGate();
+    try {
+      const tile = built.tile;
+      const db = tileDatabase(tile, this.spec);
+      const sql = tileSql(tile, this.spec.globalTimeframe ? this.spec : { globalTimeframe: DEFAULT_GLOBAL_TIMEFRAME });
+      const res = await this.plugin.query.query(db, sql, { cap: 500 });
+      let ghost = null;
+      if (tile.source && tile.compare && tile.compare !== 'none' && canCompare(tile, this.spec.globalTimeframe)) {
+        const shift = tile.compare === 'last_year' ? 'year' : 'previous';
+        const ghostRes = await this.plugin.query.query(db, sqlForWidget(tile, this.spec.globalTimeframe, shift), { cap: 500 });
+        ghost = { columns: ghostRes.columns, rows: ghostRes.rows };
+      }
+      if (seq !== this.previewSeq) return;
+      this.previewEl.empty();
+      const tileEl = this.previewEl.createDiv({ cls: 'icor-sqlv-tile is-preview' + (tile.viz === 'stat' ? ' is-stat' : '') });
+      const prepared = prepareTileForRender(tile, res);
+      renderTile(tileEl, prepared.spec, prepared.table, { ghost, compare: tile.compare, favorable: tile.favorable });
+      if (!res.rows.length) this.previewEl.createDiv({ cls: 'icor-sqlv-note', text: 'The query ran but returned no rows. Check the filters and the period.' });
+      this.previewState = nextPreviewState(this.previewState, 'ok');
+      this.syncGate();
+    } catch (e) {
+      if (seq !== this.previewSeq) return;
+      this.previewState = nextPreviewState(this.previewState, 'error');
+      this.previewError = e.message;
+      this.previewEl.empty();
+      this.previewEl.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+      this.syncGate();
+    }
+  }
+
+  /* ---------------------------------------------------- form fields -- */
+
+  field(parent, { label, required, optional }) {
+    const row = parent.createDiv({ cls: 'icor-sqlv-field' });
+    const lab = row.createDiv({ cls: 'icor-sqlv-field-label' });
+    lab.createSpan({ text: label });
+    if (required) lab.createSpan({ cls: 'icor-sqlv-field-required', text: ' (required)' });
+    if (optional) lab.createSpan({ cls: 'icor-sqlv-field-optional', text: ' (optional)' });
+    return row;
+  }
+
+  /* A searchable picker that expands inline under its field. */
+  pickerField(parent, { key, label, required, optional, valueText, placeholder, getItems }) {
+    const row = this.field(parent, { label, required, optional });
+    const btn = row.createEl('button', { cls: 'icor-sqlv-picker' + (valueText ? '' : ' is-empty') });
+    btn.createSpan({ text: valueText || placeholder });
+    btn.createSpan({ cls: 'icor-sqlv-picker-chev', text: '▾' });
+    btn.setAttribute('aria-label', label + (valueText ? ': ' + valueText : ''));
+    btn.setAttribute('aria-expanded', this.openPicker === key ? 'true' : 'false');
+    btn.addEventListener('click', () => {
+      this.openPicker = this.openPicker === key ? '' : key;
+      this.renderForm();
+    });
+    if (this.openPicker === key) {
+      const panel = row.createDiv({ cls: 'icor-sqlv-picker-panel' });
+      panel.createDiv({ cls: 'icor-sqlv-note', text: 'Loading …' });
+      Promise.resolve(getItems()).then((items) => {
+        if (this.openPicker !== key) return;
+        panel.empty();
+        searchList(panel, { items });
+      }).catch((e) => {
+        panel.empty();
+        panel.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+      });
+    }
+    return row;
+  }
+
+  nativeSelect(parent, { label, optional, options, value, onChange, ariaLabel }) {
+    const row = this.field(parent, { label, optional });
+    const select = row.createEl('select', { cls: 'dropdown' });
+    select.setAttribute('aria-label', ariaLabel || label);
+    for (const [val, text] of options) {
+      const opt = select.createEl('option', { text });
+      opt.value = val;
+      if (val === value) opt.selected = true;
+    }
+    select.addEventListener('change', () => onChange(select.value));
+    return select;
+  }
+
+  textInput(parent, { label, optional, value, placeholder, onInput, ariaLabel }) {
+    const row = this.field(parent, { label, optional });
+    const input = row.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: value || '' });
+    if (placeholder) input.setAttribute('placeholder', placeholder);
+    input.setAttribute('aria-label', ariaLabel || label);
+    input.addEventListener('input', () => onInput(input.value));
+    return input;
+  }
+
+  pick(mutate) {
+    mutate();
+    this.openPicker = '';
+    this.renderForm();
+    this.touch();
+  }
+
+  renderForm() {
+    const s = this.state;
+    const form = this.formEl;
+    form.empty();
+
+    if (s.mode === 'sql') { this.renderSqlForm(form); return; }
+
+    this.pickerField(form, {
+      key: 'database', label: 'Database', required: true,
+      valueText: s.database ? baseName(s.database) : '',
+      placeholder: 'Pick a database',
+      getItems: () => this.plugin.vaultDatabases().map((db) => ({
+        label: baseName(db.path), detail: db.path + '  ·  ' + formatBytes(db.size),
+        selected: db.path === s.database,
+        onPick: () => this.pick(() => {
+          if (s.database !== db.path) { s.table = ''; s.metric = ''; s.series = ''; s.timeColumn = ''; s.filters = []; this.schema = null; }
+          s.database = db.path;
+          this.openPicker = 'table';
+        }),
+      })),
+    });
+
+    if (s.database) {
+      this.pickerField(form, {
+        key: 'table', label: 'Table', required: true,
+        valueText: s.table, placeholder: 'Pick a table',
+        getItems: async () => (await this.ensureSchema()).tables.map((t) => ({
+          label: t.name, detail: t.columns.length + ' columns',
+          selected: t.name === s.table,
+          onPick: () => this.pick(() => {
+            if (s.table !== t.name) {
+              s.metric = ''; s.series = ''; s.filters = [];
+              s.timeColumn = guessTimeColumn(t.columns);
+            }
+            s.table = t.name;
+          }),
+        })),
+      });
+    }
+
+    const table = this.tableInfo();
+    if (s.table && table) {
+      const numbers = table.columns.filter((c) => isNumericType(c.type));
+      const texts = table.columns.filter((c) => isTextType(c.type));
+
+      this.pickerField(form, {
+        key: 'metric', label: 'Value', required: true,
+        valueText: s.agg === 'count' ? 'Count rows' : s.metric,
+        placeholder: 'What to measure',
+        getItems: () => {
+          const items = [{
+            label: 'Count rows', detail: 'how many rows match',
+            selected: s.agg === 'count',
+            onPick: () => this.pick(() => { s.metric = ''; s.agg = 'count'; }),
+          }];
+          for (const c of numbers) {
+            items.push({
+              group: 'Numbers', label: c.name, detail: c.type,
+              selected: s.agg !== 'count' && s.metric === c.name,
+              onPick: () => this.pick(() => { s.metric = c.name; if (s.agg === 'count') s.agg = 'sum'; }),
+            });
+          }
+          return items;
+        },
+      });
+
+      this.pickerField(form, {
+        key: 'timeColumn', label: 'Date', optional: true,
+        valueText: s.timeColumn, placeholder: 'Which column holds the time',
+        getItems: () => [{
+          label: 'None', detail: 'no time axis',
+          selected: !s.timeColumn,
+          onPick: () => this.pick(() => { s.timeColumn = ''; s.compare = 'none'; }),
+        }].concat(table.columns.filter((c) => isTextType(c.type) || /INT/i.test(String(c.type))).map((c) => ({
+          label: c.name,
+          selected: s.timeColumn === c.name,
+          onPick: () => this.pick(() => { s.timeColumn = c.name; }),
+        }))),
+      });
+
+      this.pickerField(form, {
+        key: 'series', label: 'Dimension', optional: true,
+        valueText: s.series ? 'By ' + s.series : '',
+        placeholder: 'Split into series',
+        getItems: () => [{
+          label: 'No split',
+          selected: !s.series,
+          onPick: () => this.pick(() => { s.series = ''; }),
+        }].concat(texts.map((c) => ({
+          label: 'By ' + c.name,
+          selected: s.series === c.name,
+          onPick: () => this.pick(() => { s.series = c.name; s.compare = 'none'; if (s.viz === 'stat') s.viz = 'bar'; }),
+        }))),
+      });
+
+      this.renderFilters(form, table, texts);
+
+      this.nativeSelect(form, {
+        label: 'Add it up', options: Object.entries(AGG_LABELS).map(([k, v]) => [k, v]),
+        value: s.agg,
+        onChange: (v) => { s.agg = v; if (v === 'latest') s.viz = 'stat'; this.renderForm(); this.touch(); },
+      });
+
+      if (s.timeColumn && !s.series) {
+        this.nativeSelect(form, {
+          label: 'Compare with', optional: true,
+          options: Object.entries(COMPARE_LABELS).map(([k, v]) => [k, v]),
+          value: s.compare,
+          onChange: (v) => { s.compare = v; this.renderForm(); this.touch(); },
+        });
+        if (s.compare !== 'none') {
+          this.nativeSelect(form, {
+            label: 'Good direction',
+            options: [['up', 'Up is good'], ['down', 'Down is good (weight, resting heart rate)']],
+            value: s.favorable,
+            onChange: (v) => { s.favorable = v; this.touch(); },
+            ariaLabel: 'Which direction counts as good for this metric',
+          });
+        }
+      }
+
+      this.textInput(form, {
+        label: 'Widget name', value: s.title, placeholder: this.suggestedTitle(),
+        onInput: (v) => { s.title = v; this.touch(); },
+      });
+
+      const vizOptions = s.agg === 'latest' ? [['stat', 'One big number']]
+        : [['line', 'Line chart'], ['bar', 'Bar chart'], ['stat', 'One big number']];
+      this.nativeSelect(form, {
+        label: 'Chart type', options: vizOptions, value: s.viz,
+        onChange: (v) => { s.viz = v; this.renderForm(); this.touch(); },
+      });
+      if (s.series && s.viz === 'bar') {
+        const stackRow = form.createDiv({ cls: 'icor-sqlv-wizard-toggle' });
+        const cb = stackRow.createEl('input', { type: 'checkbox' });
+        cb.checked = s.stack;
+        cb.setAttribute('id', 'icor-sqlv-stack');
+        const lbl = stackRow.createEl('label', { text: 'Stack the series on top of each other' });
+        lbl.setAttribute('for', 'icor-sqlv-stack');
+        cb.addEventListener('change', () => { s.stack = cb.checked; this.touch(); });
+      }
+
+      this.nativeSelect(form, {
+        label: 'Size', options: [['', 'Keep as is']].concat(Object.entries(SIZE_PRESETS).map(([k, p]) => [k, p.label])).slice(this.editIndex >= 0 ? 0 : 1),
+        value: s.sizeKey,
+        onChange: (v) => { s.sizeKey = v; },
+        ariaLabel: 'Widget size on the grid',
+      });
+
+      this.nativeSelect(form, {
+        label: 'Time frame',
+        options: [['global', 'Follow the dashboard']].concat(Object.entries(PRESET_LABELS).map(([k, v]) => [k, v])),
+        value: s.timeframe === 'global' ? 'global' : (s.timeframe && s.timeframe.preset) || 'global',
+        onChange: (v) => { s.timeframe = v === 'global' ? 'global' : { preset: v }; this.touch(); },
+        ariaLabel: 'Time frame for this widget',
+      });
+
+      this.textInput(form, {
+        label: 'Unit', optional: true, value: s.unit, placeholder: 'kg, steps, kcal …',
+        onInput: (v) => { s.unit = v; this.touch(); },
+      });
+
+      this.renderAdvanced(form);
+    }
+  }
+
+  renderFilters(form, table, texts) {
+    const s = this.state;
+    const wrap = this.field(form, { label: 'Filter data', optional: true });
+    const rows = wrap.createDiv({ cls: 'icor-sqlv-filter-rows' });
+    s.filters.forEach((row, i) => {
+      const rowEl = rows.createDiv({ cls: 'icor-sqlv-filter-row-edit' });
+      const col = rowEl.createEl('select', { cls: 'dropdown' });
+      col.setAttribute('aria-label', 'Filter column');
+      for (const c of table.columns) {
+        const opt = col.createEl('option', { text: c.name });
+        opt.value = c.name;
+        if (c.name === row.column) opt.selected = true;
+      }
+      col.addEventListener('change', () => { row.column = col.value; row.value = ''; this.renderForm(); this.touch(); });
+      const op = rowEl.createEl('select', { cls: 'dropdown' });
+      op.setAttribute('aria-label', 'Filter condition');
+      for (const [key, def] of Object.entries(FILTER_OPS)) {
+        const opt = op.createEl('option', { text: def.label });
+        opt.value = key;
+        if (key === (row.op || 'eq')) opt.selected = true;
+      }
+      op.addEventListener('change', () => { row.op = op.value; this.renderForm(); this.touch(); });
+      if (!FILTER_OPS[row.op || 'eq'].noValue) {
+        const isCategory = texts.some((c) => c.name === row.column) && (row.op || 'eq') === 'eq';
+        if (isCategory) {
+          const btn = rowEl.createEl('button', { cls: 'icor-sqlv-picker' + (row.value ? '' : ' is-empty') });
+          btn.createSpan({ text: row.value || 'Pick a value' });
+          btn.createSpan({ cls: 'icor-sqlv-picker-chev', text: '▾' });
+          btn.setAttribute('aria-label', 'Filter value for ' + row.column);
+          btn.addEventListener('click', () => {
+            this.openPicker = this.openPicker === 'filter-' + i ? '' : 'filter-' + i;
+            this.renderForm();
+          });
+        } else {
+          const input = rowEl.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: row.value === undefined ? '' : String(row.value) });
+          input.setAttribute('aria-label', 'Filter value for ' + row.column);
+          input.addEventListener('input', () => { row.value = input.value; this.touch(); });
+        }
+      }
+      const remove = rowEl.createEl('button', { cls: 'icor-sqlv-tile-action icor-sqlv-filter-remove' });
+      setIcon(remove, 'x');
+      remove.setAttribute('aria-label', 'Remove this filter');
+      remove.addEventListener('click', () => { s.filters.splice(i, 1); this.renderForm(); this.touch(); });
+      if (this.openPicker === 'filter-' + i) {
+        const panel = rows.createDiv({ cls: 'icor-sqlv-picker-panel' });
+        panel.createDiv({ cls: 'icor-sqlv-note', text: 'Loading values …' });
+        this.plugin.distinctValues(s.database, s.table, row.column).then((values) => {
+          if (this.openPicker !== 'filter-' + i) return;
+          panel.empty();
+          if (values.truncated) panel.createDiv({ cls: 'icor-sqlv-note', text: 'Showing the first 200 values.' });
+          searchList(panel, {
+            items: values.values.map((v) => ({
+              label: v, selected: row.value === v,
+              onPick: () => this.pick(() => { row.value = v; }),
+            })),
+          });
+        }).catch((e) => { panel.empty(); panel.createDiv({ cls: 'icor-sqlv-error', text: e.message }); });
+      }
+    });
+    const add = wrap.createEl('button', { text: '+ Add filter', cls: 'icor-sqlv-add-filter' });
+    add.addEventListener('click', () => {
+      s.filters.push({ column: (texts[0] && texts[0].name) || (table.columns[0] && table.columns[0].name) || '', op: 'eq', value: '' });
+      this.renderForm();
+    });
+    if (s.filters.length > 1) wrap.createDiv({ cls: 'icor-sqlv-note', text: 'All filter rows must match (AND).' });
+  }
+
+  renderAdvanced(form) {
+    const s = this.state;
+    const adv = form.createDiv({ cls: 'icor-sqlv-advanced' });
+    const toggle = adv.createEl('button', { cls: 'icor-sqlv-advanced-toggle', text: (s.advancedOpen ? '▾' : '▸') + ' Advanced' });
+    toggle.setAttribute('aria-expanded', s.advancedOpen ? 'true' : 'false');
+    toggle.addEventListener('click', () => { s.advancedOpen = !s.advancedOpen; this.renderForm(); });
+    if (!s.advancedOpen) return;
+    const built = this.buildTile();
+    const pre = adv.createEl('pre', { cls: 'icor-sqlv-sql-pre' });
+    pre.setText(built.ok ? tileSql(built.tile, this.spec) : 'The form is not complete yet: ' + built.reason);
+    const note = adv.createDiv({ cls: 'icor-sqlv-note', text: 'This is the query the widget runs, read-only. Editing it as SQL is a one-way door: the form fields go away for this widget and only the SQL stays.' });
+    const convert = adv.createEl('button', { text: 'Edit as SQL' });
+    if (s.series) {
+      convert.disabled = true;
+      adv.createDiv({ cls: 'icor-sqlv-note', text: 'A widget split into series cannot convert: its chart needs the split the form provides. Remove the dimension first.' });
+    }
+    convert.addEventListener('click', () => {
+      if (!built.ok) { new Notice('Finish the form first: ' + built.reason); return; }
+      new ConfirmModal(this.plugin.app, {
+        title: 'Edit as SQL?',
+        body: 'This widget becomes a plain SQL query. The form (value, date, filters, aggregation) goes away for it and cannot be brought back; the SQL stays editable. Nothing happens to your data.',
+        cta: 'Edit as SQL',
+        onConfirm: () => {
+          s.mode = 'sql';
+          s.sqlText = tileSql(built.tile, this.spec);
+          s.viz = built.tile.viz;
+          s.x = built.tile.viz === 'stat' ? '' : 'x';
+          s.y = 'value';
+          s.title = s.title || built.tile.title;
+          this.renderForm();
+          this.touch();
+        },
+      }).open();
+    });
+    void note;
+  }
+
+  renderSqlForm(form) {
+    const s = this.state;
+    form.createDiv({ cls: 'icor-sqlv-note', text: 'This widget is written in SQL. It runs read-only: one statement, starting with SELECT, WITH, PRAGMA or EXPLAIN.' });
+    this.textInput(form, {
+      label: 'Widget name', value: s.title, placeholder: 'SQL widget',
+      onInput: (v) => { s.title = v; this.touch(); },
+    });
+    const sqlField = this.field(form, { label: 'SQL', required: true });
+    const area = sqlField.createEl('textarea', { cls: 'icor-sqlv-console' });
+    area.value = s.sqlText;
+    area.setAttribute('rows', '6');
+    area.setAttribute('aria-label', 'SQL query');
+    area.addEventListener('input', () => { s.sqlText = area.value; this.touch(); });
+    this.nativeSelect(form, {
+      label: 'Chart type',
+      options: [['line', 'Line chart'], ['bar', 'Bar chart'], ['stat', 'One big number'], ['table', 'Table']],
+      value: s.viz,
+      onChange: (v) => { s.viz = v; this.renderForm(); this.touch(); },
+    });
+    if (s.viz === 'line' || s.viz === 'bar') {
+      this.textInput(form, { label: 'X column', value: s.x, onInput: (v) => { s.x = v; this.touch(); } });
+      this.textInput(form, { label: 'Y columns (comma-separated)', value: s.y, onInput: (v) => { s.y = v; this.touch(); } });
+    }
+    this.textInput(form, {
+      label: 'Unit', optional: true, value: s.unit, placeholder: 'kg, steps, kcal …',
+      onInput: (v) => { s.unit = v; this.touch(); },
+    });
+    this.nativeSelect(form, {
+      label: 'Size', options: [['', 'Keep as is']].concat(Object.entries(SIZE_PRESETS).map(([k, p]) => [k, p.label])).slice(this.editIndex >= 0 ? 0 : 1),
+      value: s.sizeKey,
+      onChange: (v) => { s.sizeKey = v; },
+      ariaLabel: 'Widget size on the grid',
+    });
   }
 
   async save() {
-    const source = {
-      database: this.state.database === this.spec.database ? '' : this.state.database,
-      table: this.state.table,
-      metric: this.state.metric,
-      agg: this.state.agg,
-      filter: this.state.filter && this.state.filter.value !== '' ? this.state.filter : undefined,
-      series: this.state.series || undefined,
-      timeColumn: this.state.timeColumn || undefined,
-      timeframe: this.state.timeframe,
-    };
-    const tile = {
-      title: this.state.title || this.suggestedTitle(),
-      viz: this.state.viz,
-      unit: this.state.unit,
-      stack: this.state.stack && !!this.state.series,
-      source,
-    };
-    const check = checkWidgetSource(source, tile.viz, 'This widget');
-    if (!check.ok) throw new Error(check.reason);
-    if (!source.database) delete source.database;
+    if (!canSave(this.previewState)) return;
+    const built = this.buildTile();
+    if (!built.ok) { new Notice(built.reason); return; }
+    const tile = built.tile;
+    const existing = this.editIndex >= 0 ? this.spec.tiles[this.editIndex] : null;
+    if (this.state.sizeKey && SIZE_PRESETS[this.state.sizeKey]) {
+      const p = SIZE_PRESETS[this.state.sizeKey];
+      if (existing && existing.layout) {
+        tile.layout = { x: existing.layout.x, y: existing.layout.y, w: p.w, h: p.h };
+      } else {
+        const layouts = normalizeLayout(this.spec.tiles, GRID_MAX_COLS);
+        tile.layout = findSpot(layouts, { w: p.w, h: p.h }, GRID_MAX_COLS);
+      }
+    } else if (existing && existing.layout) {
+      tile.layout = existing.layout;
+    }
     if (this.editIndex >= 0) this.spec.tiles[this.editIndex] = tile;
     else this.spec.tiles.push(tile);
+    this.close();
     await this.view.saveAndRender(this.spec);
   }
-}
-
-/* Editing a hand-written SQL tile: the SQL stays SQL, shown as such. */
-class RawTileModal extends Modal {
-  constructor(plugin, view, spec, index) {
-    super(plugin.app);
-    this.plugin = plugin;
-    this.view = view;
-    this.spec = spec;
-    this.index = index;
-  }
-  onOpen() {
-    const tile = this.spec.tiles[this.index];
-    (this.modalEl || this.contentEl).setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
-    this.titleEl.setText('Edit SQL widget');
-    const { contentEl } = this;
-    contentEl.empty();
-    contentEl.addClass('icor-sqlv-wizard');
-    contentEl.createDiv({ cls: 'icor-sqlv-note', text: 'This widget is written in SQL. It runs read-only against ' + (this.spec.database || 'its database') + '.' });
-    contentEl.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Title' });
-    const title = contentEl.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: tile.title });
-    title.setAttribute('aria-label', 'Widget title');
-    contentEl.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'SQL' });
-    const sql = contentEl.createEl('textarea', { cls: 'icor-sqlv-console' });
-    sql.value = tile.sql;
-    sql.setAttribute('rows', '6');
-    sql.setAttribute('aria-label', 'SQL query');
-    const bar = contentEl.createDiv({ cls: 'icor-sqlv-console-bar icor-sqlv-modal-bar' });
-    const save = bar.createEl('button', { text: 'Save widget', cls: 'mod-cta' });
-    const err = contentEl.createDiv({ cls: 'icor-sqlv-note' });
-    save.addEventListener('click', async () => {
-      const gate = gateStatement(sql.value);
-      if (!gate.ok) { err.setText(gate.reason); err.addClass('icor-sqlv-error'); return; }
-      tile.title = title.value.trim();
-      tile.sql = sql.value;
-      this.close();
-      await this.view.saveAndRender(this.spec);
-    });
-    const cancel = bar.createEl('button', { text: 'Cancel' });
-    cancel.addEventListener('click', () => this.close());
-  }
-  onClose() { this.contentEl.empty(); }
 }
 
 /* --------------------------------------------------- the index modal -- */
@@ -3657,8 +4052,13 @@ IcorSqliteViewerPlugin.lib = {
   tileDatabase, tileSql, isNumericType, isTextType, guessTimeColumn,
   matchesNeedle, colsForWidth, defaultSpanFor, clampLayout, rectsCollide,
   findSpot, packLayout, normalizeLayout, showAddTile, seriesPaletteFor, barPath,
+  FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
+  deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
   STARTER_DASHBOARDS, DEFAULT_SETTINGS, PRESET_LABELS, AGG_LABELS, DEFAULT_GLOBAL_TIMEFRAME,
 };
+
+/* The form modal, exposed for the gates only. */
+IcorSqliteViewerPlugin.modals = { WidgetFormModal, ConfirmModal };
 
 module.exports = IcorSqliteViewerPlugin;

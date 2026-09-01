@@ -60,6 +60,24 @@ open the database shows the cached dashboard with a plain line: "Computed
 on desktop, 2 hours ago." Databases under the size cap render live
 everywhere.
 
+## The widget form
+
+Since 0.4.0 a widget is one settings page that reads top to bottom like a
+sentence: which database, which table, which value, when, split by what,
+narrowed how (filter rows: column, condition, value), added up how,
+compared with what, called what, drawn how, how big, over which period.
+Required fields are few and labeled; everything else has a sensible
+default. A live preview runs beside the form through the normal read-only
+engines and updates as fields change; a widget saves only after its
+preview ran green. "Compare with" draws the prior period as a dotted
+ghost line on charts and a delta badge on stat tiles, and each widget
+carries its own good-direction setting: for weight or resting heart rate,
+down is the good direction, and the badge colors by meaning, not by sign.
+SQL is optional and folded away under Advanced, where the generated query
+is shown read-only; "Edit as SQL" converts the widget to a plain SQL tile,
+a one-way door that says so first. On phones the form stacks with the
+preview above the Save button.
+
 ## The dashboard builder
 
 Since 0.2.0 dashboards are built in the UI, no SQL needed. "New dashboard"

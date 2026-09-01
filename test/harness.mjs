@@ -99,7 +99,7 @@ export function makeObsidian({ desktop = true } = {}) {
     },
     PluginSettingTab: class { constructor(app, plugin) { this.app = app; this.plugin = plugin; this.containerEl = makeEl('div'); } },
     Setting: class { constructor() { return chain(); } },
-    Modal: class { constructor(app) { this.app = app; this.contentEl = makeEl('div'); this.titleEl = makeEl('div'); } open() { this.opened = true; if (this.onOpen) this.onOpen(); } close() { this.closed = true; if (this.onClose) this.onClose(); } },
+    Modal: class { constructor(app) { this.app = app; this.contentEl = makeEl('div'); this.titleEl = makeEl('div'); this.modalEl = makeEl('div'); } open() { this.opened = true; if (this.onOpen) this.onOpen(); } close() { this.closed = true; if (this.onClose) this.onClose(); } },
     Notice: class { constructor(msg) { this.msg = msg; notices.push(String(msg)); } },
     Platform: { isDesktopApp: desktop, isMobile: !desktop, isMobileApp: !desktop, isMacOS: true, isWin: false, isLinux: false },
     setIcon: (el, icon) => { el.attrs['data-icon'] = icon; },

@@ -27,7 +27,7 @@ test('tall table: filter + sum per day, global timeframe, anchored on the newest
     viz: 'bar',
     source: {
       table: 'health_metric', metric: 'qty', agg: 'sum',
-      filter: { column: 'metric_name', value: 'step_count' },
+      filters: [{ column: 'metric_name', op: 'eq', value: 'step_count' }],
       timeColumn: 'local_date', timeframe: 'global',
     },
   };
@@ -84,7 +84,7 @@ test('count needs no metric; series adds a column and the group by; groupBy over
 test('stat widgets: aggregate to one value; latest reads the newest row', () => {
   const sum = lib.sqlForWidget({ viz: 'stat', source: { table: 't', metric: 'v', agg: 'sum', timeColumn: 'day', timeframe: { preset: '7d' } } }, G90);
   assert.equal(sum, 'SELECT SUM("v") AS value FROM "t" WHERE "day" >= date((SELECT MAX("day") FROM "t"), \'-7 day\')');
-  const latest = lib.sqlForWidget({ viz: 'stat', source: { table: 'health_metric', metric: 'qty', agg: 'latest', filter: { column: 'metric_name', value: 'weight_body_mass' }, timeColumn: 'local_date', timeframe: { preset: 'all' } } }, G90);
+  const latest = lib.sqlForWidget({ viz: 'stat', source: { table: 'health_metric', metric: 'qty', agg: 'latest', filters: [{ column: 'metric_name', op: 'eq', value: 'weight_body_mass' }], timeColumn: 'local_date', timeframe: { preset: 'all' } } }, G90);
   assert.equal(latest, 'SELECT "qty" AS value, "local_date" AS at FROM "health_metric" WHERE "metric_name" = \'weight_body_mass\' ORDER BY "local_date" DESC LIMIT 1');
 });
 
@@ -93,7 +93,7 @@ test('hostile names and values cannot break out of their quoting, and the gate s
     viz: 'bar',
     source: {
       table: 'we"ird', metric: 'va"l', agg: 'sum',
-      filter: { column: 'ki"nd', value: "o'brien; DROP TABLE x" },
+      filters: [{ column: 'ki"nd', op: 'eq', value: "o'brien; DROP TABLE x" }],
       timeColumn: 'da"y', timeframe: { preset: '7d' },
     },
   }, G90);
@@ -109,9 +109,9 @@ test('every generated SQL passes the read-only gate: a permutation sweep', () =>
   for (const viz of ['line', 'bar', 'stat']) {
     for (const agg of aggs) {
       for (const timeframe of frames) {
-        for (const filter of [undefined, { column: 'kind', value: 'x' }]) {
+        for (const filters of [undefined, [{ column: 'kind', op: 'eq', value: 'x' }]]) {
           for (const series of viz === 'stat' ? [undefined] : [undefined, 'cat']) {
-            const tile = { viz, source: { table: 't', metric: agg === 'count' ? '' : 'v', agg, filter, series, timeColumn: 'day', timeframe } };
+            const tile = { viz, source: { table: 't', metric: agg === 'count' ? '' : 'v', agg, filters, series, timeColumn: 'day', timeframe } };
             const sql = lib.sqlForWidget(tile, G90);
             assert.equal(lib.gateStatement(sql).ok, true, 'gate must pass: ' + sql);
             n++;
