@@ -226,8 +226,12 @@
   font-size: var(--font-ui-smaller);
 }
 
-/* The filter row stays quiet: no boxes, just a faint underline that wakes
- * up on focus. `all: unset` again, so no theme pill survives. */
+/* The filter row is hidden until the funnel shows it, and then it stays
+ * quiet: no boxes, just a hairline underline that wakes up on focus. The
+ * view root carries data-ink-plugin, INKLINE's own opt-out from its
+ * element-level input skins; the !important marks below are the belt for
+ * any other theme that skins bare inputs with weight. Here the theme is
+ * the aggressor. */
 .icor-sqlv-filter-row th {
   position: static;
   padding: 0 var(--size-2-3) var(--size-2-1);
@@ -235,32 +239,86 @@
   border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.icor-sqlv-table input.icor-sqlv-filter {
+.icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter {
   all: unset;
   display: block;
   width: 100%;
   min-width: 5em;
   box-sizing: border-box;
-  padding: 1px 0;
+  padding: 1px 0 !important;
+  height: auto !important;
+  min-height: 0 !important;
   font-size: var(--font-ui-smaller);
+  font-family: inherit !important;
   color: var(--text-normal);
-  border-bottom: 1px solid transparent;
+  background: transparent !important;
+  background-image: none !important;
+  border: none !important;
+  border-bottom: 1px solid transparent !important;
+  border-radius: 0 !important;
+  box-shadow: none !important;
   cursor: text;
 }
 
-.icor-sqlv-table input.icor-sqlv-filter::placeholder {
+.icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter::placeholder {
   color: var(--text-faint);
   opacity: 0.6;
 }
 
-.icor-sqlv-table input.icor-sqlv-filter:hover {
-  border-bottom-color: var(--background-modifier-border);
+.icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter:hover {
+  background-image: none !important;
+  border-bottom-color: var(--background-modifier-border) !important;
 }
 
-.icor-sqlv-table input.icor-sqlv-filter:focus,
-.icor-sqlv-table input.icor-sqlv-filter:focus-visible {
-  outline: none;
-  border-bottom-color: var(--interactive-accent);
+.icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter:focus,
+.icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter:focus-visible {
+  outline: none !important;
+  border-bottom-color: var(--interactive-accent) !important;
+  box-shadow: none !important;
+}
+
+/* The funnel that shows and hides the filter row. The dot says filters
+ * are active even while the row is hidden. */
+.icor-sqlv-tabs-spacer { flex: 1 1 auto; }
+
+.icor-sqlv-tabs button.icor-sqlv-funnel {
+  all: unset;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.icor-sqlv-tabs button.icor-sqlv-funnel:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.icor-sqlv-tabs button.icor-sqlv-funnel:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+}
+
+.icor-sqlv-tabs button.icor-sqlv-funnel[aria-pressed="true"] {
+  color: var(--text-normal);
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+
+.icor-sqlv-funnel svg { width: 15px; height: 15px; }
+
+.icor-sqlv-funnel.has-filters::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  right: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--interactive-accent);
 }
 
 .icor-sqlv-pager {
@@ -633,6 +691,35 @@
   .icor-sqlv-add-tile { min-height: 140px; }
   .icor-sqlv-dash-bar button,
   .icor-sqlv-modal-bar button { min-height: 40px; }
+}
+
+/* ---------------------------------------------------------- JSON view -- */
+
+.icor-sqlv-json {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-3);
+  height: 100%;
+  padding: var(--size-4-2) var(--size-4-3);
+}
+
+.icor-sqlv-json-pre {
+  flex: 1 1 auto;
+  margin: 0;
+  overflow: auto;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  padding: var(--size-4-2);
+  white-space: pre;
+}
+
+.icor-sqlv-json-editor {
+  flex: 1 1 auto;
+  resize: none;
 }
 
 /* ------------------------------------------------------ notes and errors -- */

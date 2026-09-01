@@ -44,6 +44,11 @@ class FakeEl {
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   addClass(c) { this.classSet.add(c); }
+  get classList() {
+    const s = this.classSet;
+    return { add: (...c) => { for (const x of c) s.add(x); }, remove: (...c) => { for (const x of c) s.delete(x); }, contains: (c) => s.has(c) };
+  }
+  focus() { this.focused = true; }
   appendChild(node) { node.parentElement = this; this.children.push(node); return node; }
   addEventListener(type, fn) { (this.handlers[type] || (this.handlers[type] = [])).push(fn); }
   empty() { this.children = []; }

@@ -104,7 +104,7 @@ async function makeServicePlugin(adapter, { desktop = true } = {}) {
   const fresh = loadPlugin({ desktop });
   const app = {
     vault: { adapter, getFiles: () => [] },
-    workspace: { onLayoutReady: () => {} },
+    workspace: { onLayoutReady: () => {}, on: () => ({}) },
   };
   const plugin = fresh.makePlugin(app);
   plugin.app = app;

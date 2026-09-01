@@ -117,6 +117,25 @@ new path. No data is lost or modified, the files are only moved, together
 with their `-wal` and `-shm` companion files. Close other apps that are
 using a database before moving it. Nothing is ever overwritten.
 
+## JSON files
+
+Obsidian does not open .json files natively, so the plugin claims the
+extension. A file that is a dashboard spec opens as its dashboard in the
+builder. Any other JSON opens in a clean reader: pretty-printed,
+read-only, monospace, with a copy button and an "Edit as text" switch
+that saves on blur or Cmd+S. A file over 2 MB shows its size and its
+first part instead of freezing the pane. If another plugin already claims
+.json, this plugin steps aside with a notice.
+
+## Filters and themes
+
+The data browser's per-column filters live behind a funnel icon next to
+the tabs; at rest the table is just a header and its rows. An accent dot
+on the funnel says filters are active even while the row is hidden. The
+plugin's views declare INKLINE's plugin-owned control boundary
+(`data-ink-plugin`), so the theme's input and button skins stand down
+inside them; explicit flat styles cover other themes.
+
 ## Commands
 
 - **SQLite Viewer: Open dashboards** (also the chart icon in the ribbon)

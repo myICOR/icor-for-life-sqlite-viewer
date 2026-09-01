@@ -72,7 +72,7 @@ test('the full dashboard pipeline against the real vault, on the GUI PATH', { sk
   try {
     const { makePlugin } = loadPlugin();
     const adapter = makeLiveAdapter(vaultPath, overlay);
-    const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {} } };
+    const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {}, on: () => ({}) } };
     const plugin = makePlugin(app);
     await plugin.onload();
 
@@ -117,7 +117,7 @@ test('the dashboards view renders every tile or its error, never nothing', { ski
   try {
     const { makePlugin } = loadPlugin();
     const adapter = makeLiveAdapter(vaultPath, overlay);
-    const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {} } };
+    const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {}, on: () => ({}) } };
     const plugin = makePlugin(app);
     await plugin.onload();
     await plugin.query.detect();

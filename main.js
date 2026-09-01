@@ -61,7 +61,7 @@
 
 const {
   Plugin, PluginSettingTab, Setting, Modal, Notice, Platform, setIcon,
-  ItemView, FileView, TFile, normalizePath,
+  ItemView, FileView, TFile, TFolder, normalizePath,
 } = require('obsidian');
 
 /* ------------------------------------------------------------ constants -- */
@@ -74,6 +74,10 @@ const ALLOWED_KEYWORDS = new Set(['select', 'with', 'pragma', 'explain']);
 const VIZ_KINDS = new Set(['line', 'bar', 'stat', 'table']);
 const VIEW_BROWSER = 'icor-sqlite-viewer-browser';
 const VIEW_DASHBOARDS = 'icor-sqlite-viewer-dashboards';
+const VIEW_JSON = 'icor-sqlite-viewer-json';
+/* A JSON file bigger than this is shown in part, never fully rendered. */
+const JSON_RENDER_CAP = 2 * MB;
+const JSON_SLICE = 200 * 1024;
 const CLI_MAX_BUFFER = 64 * MB;
 /* The vault's chart colors, in series order. All Obsidian variables. */
 const SERIES_COLORS = [
@@ -1223,6 +1227,9 @@ class SqliteBrowserView extends FileView {
     this.sortCol = null;
     this.sortDir = 'asc';
     this.filters = {};
+    this.filtersVisible = false;
+    this.focusFilters = false;
+    this.funnelEl = null;
     this.consoleSql = '';
     this.consoleResult = null;
     this.engineInfo = null;
@@ -1291,6 +1298,11 @@ class SqliteBrowserView extends FileView {
     const root = this.contentEl;
     root.empty();
     root.addClass('icor-sqlv-root');
+    /* INKLINE's plugin-owned control boundary: inside a subtree carrying
+     * data-ink-plugin the theme's element-level input and button skins
+     * stand down, and this plugin owns its own controls. Other themes see
+     * the explicit resets in styles.css. */
+    root.setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
 
     if (!this.dbPath) {
       const empty = root.createDiv({ cls: 'icor-sqlv-blank' });
@@ -1367,6 +1379,18 @@ class SqliteBrowserView extends FileView {
     else await this.setDatabase(path);
   }
 
+  hasActiveFilters() {
+    return Object.values(this.filters || {}).some((v) => v !== '' && v !== null && v !== undefined);
+  }
+
+  /* Keep the funnel's dot honest after a filter changes without redrawing
+   * the whole tab bar. */
+  renderFunnelState() {
+    if (!this.funnelEl) return;
+    if (this.hasActiveFilters()) this.funnelEl.classList.add('has-filters');
+    else this.funnelEl.classList.remove('has-filters');
+  }
+
   renderMain() {
     const main = this.mainEl;
     main.empty();
@@ -1374,6 +1398,24 @@ class SqliteBrowserView extends FileView {
     for (const [id, label] of [['data', 'Data'], ['schema', 'Schema'], ['sql', 'SQL console']]) {
       const b = tabs.createEl('button', { text: label, cls: this.tab === id ? 'is-active' : '' });
       b.addEventListener('click', () => { this.tab = id; this.renderMain(); });
+    }
+    if (this.tab === 'data') {
+      /* The funnel: filters live behind it, so the table at rest is just a
+       * header and its rows. An accent dot says filters are active even
+       * while the row is hidden, so a hidden filter never hides data
+       * silently. */
+      tabs.createDiv({ cls: 'icor-sqlv-tabs-spacer' });
+      const funnel = tabs.createEl('button', { cls: 'icor-sqlv-funnel' + (this.hasActiveFilters() ? ' has-filters' : '') });
+      this.funnelEl = funnel;
+      setIcon(funnel, 'filter');
+      funnel.setAttribute('aria-label', this.filtersVisible ? 'Hide the filter row' : 'Show the filter row');
+      funnel.setAttribute('title', (this.filtersVisible ? 'Hide filters' : 'Filter columns') + (this.hasActiveFilters() ? ' (filters are active)' : ''));
+      funnel.setAttribute('aria-pressed', this.filtersVisible ? 'true' : 'false');
+      funnel.addEventListener('click', () => {
+        this.filtersVisible = !this.filtersVisible;
+        this.focusFilters = this.filtersVisible;
+        this.renderMain();
+      });
     }
     this.bodyEl = main.createDiv({ cls: 'icor-sqlv-body' });
     if (this.tab === 'data') this.renderData();
@@ -1419,19 +1461,28 @@ class SqliteBrowserView extends FileView {
         this.renderData();
       });
     }
-    const filterRow = thead.createEl('tr', { cls: 'icor-sqlv-filter-row' });
-    for (const col of res.columns) {
-      const th = filterRow.createEl('th');
-      const input = th.createEl('input', { type: 'text', cls: 'icor-sqlv-filter', value: this.filters[col] || '' });
-      input.setAttribute('placeholder', 'filter');
-      input.setAttribute('aria-label', 'Filter ' + col);
-      input.addEventListener('keydown', (ev) => {
-        if (ev.key === 'Enter') {
-          this.filters[col] = input.value.trim();
-          this.page = 0;
-          this.renderData();
-        }
-      });
+    if (this.filtersVisible) {
+      const filterRow = thead.createEl('tr', { cls: 'icor-sqlv-filter-row' });
+      let firstInput = null;
+      for (const col of res.columns) {
+        const th = filterRow.createEl('th');
+        const input = th.createEl('input', { type: 'text', cls: 'icor-sqlv-filter', value: this.filters[col] || '' });
+        if (!firstInput) firstInput = input;
+        input.setAttribute('placeholder', 'filter');
+        input.setAttribute('aria-label', 'Filter ' + col);
+        input.addEventListener('keydown', (ev) => {
+          if (ev.key === 'Enter') {
+            this.filters[col] = input.value.trim();
+            this.page = 0;
+            this.renderData();
+            this.renderFunnelState();
+          }
+        });
+      }
+      if (this.focusFilters && firstInput && typeof firstInput.focus === 'function') {
+        this.focusFilters = false;
+        firstInput.focus();
+      }
     }
     const tbody = t.createEl('tbody');
     for (const row of res.rows) {
@@ -1453,7 +1504,7 @@ class SqliteBrowserView extends FileView {
     next.addEventListener('click', () => { this.page += 1; this.renderData(); });
     if (Object.values(this.filters).some((v) => v)) {
       const clear = pager.createEl('button', { text: 'Clear filters' });
-      clear.addEventListener('click', () => { this.filters = {}; this.page = 0; this.renderData(); });
+      clear.addEventListener('click', () => { this.filters = {}; this.page = 0; this.renderData(); this.renderFunnelState(); });
     }
     /* Total, filled in when the count comes back. */
     this.plugin.query.query(this.dbPath, buildCountQuery(this.active, { filters: this.filters }))
@@ -1604,6 +1655,11 @@ class SqliteDashboardsView extends ItemView {
     const root = this.contentEl;
     root.empty();
     root.addClass('icor-sqlv-root');
+    /* INKLINE's plugin-owned control boundary: inside a subtree carrying
+     * data-ink-plugin the theme's element-level input and button skins
+     * stand down, and this plugin owns its own controls. Other themes see
+     * the explicit resets in styles.css. */
+    root.setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
     const bar = root.createDiv({ cls: 'icor-sqlv-dash-bar' });
     if (this.specs.length) {
       const select = bar.createEl('select', { cls: 'dropdown' });
@@ -1868,6 +1924,7 @@ class ConfirmModal extends Modal {
   }
   onOpen() {
     this.titleEl.setText(this.opts.title);
+    (this.modalEl || this.contentEl).setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
     this.contentEl.empty();
     this.contentEl.createDiv({ text: this.opts.body });
     const bar = this.contentEl.createDiv({ cls: 'icor-sqlv-console-bar icor-sqlv-modal-bar' });
@@ -1912,6 +1969,7 @@ class WidgetWizard extends Modal {
 
   onOpen() {
     this.modalEl.addClass('icor-sqlv-wizard-modal');
+    this.modalEl.setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
     this.renderStep();
   }
   onClose() { this.contentEl.empty(); }
@@ -2301,6 +2359,7 @@ class RawTileModal extends Modal {
   }
   onOpen() {
     const tile = this.spec.tiles[this.index];
+    (this.modalEl || this.contentEl).setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
     this.titleEl.setText('Edit SQL widget');
     const { contentEl } = this;
     contentEl.empty();
@@ -2342,6 +2401,7 @@ class DatabaseIndexModal extends Modal {
 
   onOpen() {
     this.titleEl.setText('Databases in this vault');
+    (this.modalEl || this.contentEl).setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
     const { contentEl } = this;
     contentEl.empty();
     const dbs = this.plugin.vaultDatabases();
@@ -2378,6 +2438,7 @@ class MigrationModal extends Modal {
 
   onOpen() {
     this.titleEl.setText('Move databases into ' + this.plan.targetRoot);
+    (this.modalEl || this.contentEl).setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
     const { contentEl } = this;
     contentEl.empty();
 
@@ -2508,6 +2569,129 @@ class SqliteViewerSettingTab extends PluginSettingTab {
         const plan = planMigration(dbs.map((d) => d.path), existing, this.plugin.settings.dataFolder);
         new MigrationModal(this.plugin, plan).open();
       }));
+  }
+}
+
+/* ------------------------------------------------------ the JSON view -- */
+
+/* Obsidian does not open .json files natively, so this plugin claims the
+ * extension. A file that parses as a dashboard spec opens as its dashboard
+ * in the builder; every other JSON gets a clean reader: pretty-printed,
+ * read-only, monospace, with a copy button and an explicit switch to a
+ * plain text editor that saves on blur or Cmd+S. A big file is shown in
+ * part instead of freezing the pane. */
+class JsonFileView extends FileView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.allowNoFile = false;
+    this.navigation = true;
+    this.text = null;
+    this.tooBig = false;
+    this.editing = false;
+  }
+
+  getViewType() { return VIEW_JSON; }
+  getIcon() { return 'braces'; }
+  getDisplayText() { return this.file ? this.file.name : 'JSON'; }
+  canAcceptExtension(ext) { return String(ext).toLowerCase() === 'json'; }
+
+  async onLoadFile(file) {
+    this.editing = false;
+    this.tooBig = file.stat.size > JSON_RENDER_CAP;
+    this.text = await this.app.vault.read(file);
+
+    /* A dashboard spec does not belong in a raw reader: hand the leaf to
+     * the builder, after this load settles. */
+    if (!this.tooBig) {
+      const parsed = parseDashboardSpec(this.text);
+      if (parsed.ok) {
+        const leaf = this.leaf;
+        const id = parsed.spec.id;
+        setTimeout(async () => {
+          try {
+            await leaf.setViewState({ type: VIEW_DASHBOARDS, active: true });
+            const view = leaf.view;
+            if (view && typeof view.reload === 'function') {
+              view.activeId = id;
+              await view.reload();
+            }
+          } catch (e) {
+            console.error('ICOR SQLite Viewer: could not open the dashboard for ' + file.path, e);
+          }
+        }, 0);
+        return;
+      }
+    }
+    this.render();
+  }
+
+  async onUnloadFile() {
+    this.text = null;
+    this.editing = false;
+  }
+
+  render() {
+    const root = this.contentEl;
+    root.empty();
+    root.addClass('icor-sqlv-root');
+    root.setAttribute('data-ink-plugin', 'icor-for-life-sqlite-viewer');
+    if (this.text === null) return;
+    const host = root.createDiv({ cls: 'icor-sqlv-json' });
+    const bar = host.createDiv({ cls: 'icor-sqlv-console-bar' });
+
+    let parsed = null;
+    let parseError = '';
+    if (!this.tooBig) {
+      try { parsed = JSON.parse(this.text); } catch (e) { parseError = e.message; }
+    }
+
+    if (this.editing) {
+      const area = host.createEl('textarea', { cls: 'icor-sqlv-console icor-sqlv-json-editor' });
+      area.value = this.text;
+      area.setAttribute('aria-label', 'JSON text');
+      const save = async () => {
+        if (area.value === this.text) return;
+        this.text = area.value;
+        await this.app.vault.modify(this.file, this.text);
+        new Notice('Saved ' + this.file.name + '.');
+      };
+      area.addEventListener('blur', save);
+      area.addEventListener('keydown', (ev) => {
+        if ((ev.metaKey || ev.ctrlKey) && ev.key === 's') { ev.preventDefault(); save(); }
+      });
+      const done = bar.createEl('button', { text: 'Done editing', cls: 'mod-cta' });
+      done.addEventListener('click', async () => { await save(); this.editing = false; this.render(); });
+      if (typeof area.focus === 'function') area.focus();
+      return;
+    }
+
+    const copy = bar.createEl('button', { text: 'Copy JSON' });
+    copy.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(this.text);
+      new Notice('Copied ' + this.file.name + '.');
+    });
+    if (!this.tooBig) {
+      const edit = bar.createEl('button', { text: 'Edit as text' });
+      edit.addEventListener('click', () => { this.editing = true; this.render(); });
+    }
+    const note = bar.createSpan({ cls: 'icor-sqlv-note' });
+    if (this.tooBig) {
+      note.setText('A big file (' + formatBytes(this.text.length) + '). Showing the first part, read-only.');
+    } else if (parseError) {
+      note.setText('Not valid JSON: ' + parseError);
+    } else {
+      note.setText(formatBytes(this.text.length) + ', read-only');
+    }
+
+    const pre = host.createEl('pre', { cls: 'icor-sqlv-json-pre' });
+    if (this.tooBig) {
+      pre.setText(this.text.slice(0, JSON_SLICE) + '\n…');
+    } else if (parsed !== null) {
+      pre.setText(JSON.stringify(parsed, null, 2));
+    } else {
+      pre.setText(this.text);
+    }
   }
 }
 
@@ -2737,13 +2921,39 @@ class IcorSqliteViewerPlugin extends Plugin {
 
     this.registerView(VIEW_BROWSER, (leaf) => new SqliteBrowserView(leaf, this));
     this.registerView(VIEW_DASHBOARDS, (leaf) => new SqliteDashboardsView(leaf, this));
+    this.registerView(VIEW_JSON, (leaf) => new JsonFileView(leaf, this));
     try {
       this.registerExtensions(['db', 'sqlite', 'sqlite3'], VIEW_BROWSER);
     } catch (e) {
       new Notice('Another plugin already opens .db files. Use the "SQLite Viewer: List databases" command instead.');
     }
+    try {
+      this.registerExtensions(['json'], VIEW_JSON);
+    } catch (e) {
+      new Notice('Another plugin already opens .json files, so this plugin leaves them to it.');
+    }
 
     this.addRibbonIcon('bar-chart-3', 'Open dashboards', () => this.openDashboards());
+
+    /* "New dashboard" next to New note and New folder in the folder menu.
+     * Dashboards always land in the configured dashboards folder; a click
+     * from somewhere else says so. */
+    this.registerEvent(this.app.workspace.on('file-menu', (menu, file) => {
+      if (!(file instanceof TFolder)) return;
+      menu.addItem((item) => {
+        item.setTitle('New dashboard');
+        item.setIcon('bar-chart-3');
+        if (typeof item.setSection === 'function') item.setSection('action-primary');
+        item.onClick(async () => {
+          const spec = await this.createDashboard();
+          const folder = this.settings.dashboardFolder;
+          const near = file.path === folder || file.path === '/'
+            || folder.startsWith(file.path + '/') || file.path.startsWith(folder + '/');
+          if (!near) new Notice('New dashboard saved in ' + folder + '.');
+          await this.openDashboards(spec.id);
+        });
+      });
+    }));
 
     this.addCommand({ id: 'open-dashboards', name: 'Open dashboards', callback: () => this.openDashboards() });
     this.addCommand({

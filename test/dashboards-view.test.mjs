@@ -22,7 +22,7 @@ function textOf(el) { let t = el.textContent || ''; for (const c of el.children 
 
 async function makeView(adapter, { desktop = true } = {}) {
   const { makePlugin } = loadPlugin({ desktop });
-  const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {} } };
+  const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {}, on: () => ({}) } };
   const plugin = makePlugin(app);
   await plugin.onload();
   const view = plugin.viewFactories[VIEW_DASHBOARDS]({ app });

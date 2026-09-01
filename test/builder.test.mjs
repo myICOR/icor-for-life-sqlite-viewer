@@ -247,7 +247,7 @@ test('tileDatabase and tileSql: widget database beats dashboard database; raw SQ
 
 async function makeCatalogPlugin(adapter, { desktop = true } = {}) {
   const fresh = loadPlugin({ desktop });
-  const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {} } };
+  const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {}, on: () => ({}) } };
   const plugin = fresh.makePlugin(app);
   plugin.app = app;
   await plugin.onload();
