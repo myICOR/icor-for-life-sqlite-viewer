@@ -93,8 +93,7 @@ test('the full dashboard pipeline against the real vault, on the GUI PATH', { sk
         cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows }));
       }
       await plugin.writeDashboardCache(spec, cachedTiles);
-      const stem = spec.database.split('/').pop().replace(/\.[^.]+$/, '');
-      const cacheFile = join(overlay, '07 Data', 'Dashboard Cache', stem, spec.id + '.json');
+      const cacheFile = join(overlay, '07 Data', 'Dashboard Cache', 'dashboards', spec.id + '.json');
       assert.ok(existsSync(cacheFile), 'the cache must be written for ' + spec.id);
       const cache = JSON.parse(readFileSync(cacheFile, 'utf8'));
       assert.equal(cache.tiles.length, spec.tiles.length);
@@ -129,11 +128,15 @@ test('the dashboards view renders every tile or its error, never nothing', { ski
     view.app = app;
     await view.onOpen();
     /* renderDashboard runs unawaited from render(); give it one turn per
-     * tile plus slack, then measure the DOM it left behind. */
-    for (let i = 0; i < 200 && !treeHasClass(view.contentEl, 'icor-sqlv-tile'); i++) {
+     * tile plus slack, then measure the DOM it left behind. The + tile
+     * appears instantly and does not count as a rendered widget. */
+    const realTiles = () => collectByClass(view.contentEl, 'icor-sqlv-tile').filter((el) => !el.classSet.has('icor-sqlv-add-tile'));
+    for (let i = 0; i < 200 && realTiles().length === 0; i++) {
       await new Promise((r) => setTimeout(r, 50));
     }
-    const tiles = collectByClass(view.contentEl, 'icor-sqlv-tile');
+    /* And let the last tile finish. */
+    await new Promise((r) => setTimeout(r, 500));
+    const tiles = realTiles();
     const errors = collectByClass(view.contentEl, 'icor-sqlv-error');
     assert.ok(tiles.length > 0 || errors.length > 0,
       'the view rendered nothing at all: no tiles and no visible error text');

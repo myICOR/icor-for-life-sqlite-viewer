@@ -326,10 +326,13 @@ function findDatabases(files) {
 
 /* ---------------------------------------------------- dashboard specs -- */
 
-/* A dashboard is a JSON file: { id, title, database, tiles: [...] }. Each
- * tile: { title, sql, viz: line|bar|stat|table, x, y, unit?, stack? }.
- * `y` is one column name or a list of them. Every tile's SQL passes the
- * statement gate at parse time, before it is ever run. */
+/* A dashboard is a JSON file: { id, title, database?, globalTimeframe?,
+ * tiles: [...] }. A tile is either a raw SQL tile
+ * { title, sql, viz, x, y, unit?, stack? } or a built widget
+ * { title, viz, unit?, stack?, source: { database?, table, metric, agg,
+ * filter?, series?, groupBy?, timeColumn?, timeframe? } }. Raw SQL passes
+ * the statement gate at parse time; built widgets get their SQL generated
+ * by sqlForWidget, through the same gate at query time. */
 function parseDashboardSpec(text) {
   let raw;
   try {
@@ -346,21 +349,54 @@ function parseDashboardSpec(text) {
   if (typeof raw.title !== 'string' || !raw.title.trim()) {
     return { ok: false, reason: 'The dashboard needs a "title".' };
   }
-  if (typeof raw.database !== 'string' || !raw.database.trim()) {
-    return { ok: false, reason: 'The dashboard needs a "database": a vault path like "07 Data/example.db".' };
+  if (raw.database !== undefined && (typeof raw.database !== 'string' || !raw.database.trim())) {
+    return { ok: false, reason: 'The "database" must be a vault path like "07 Data/example.db".' };
   }
-  if (!Array.isArray(raw.tiles) || raw.tiles.length === 0) {
-    return { ok: false, reason: 'The dashboard needs at least one tile in "tiles".' };
+  if (!validTimeframe(raw.globalTimeframe, false)) {
+    return { ok: false, reason: 'The "globalTimeframe" must be a preset like {"preset":"90d"} or {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}.' };
   }
+  if (!Array.isArray(raw.tiles)) {
+    return { ok: false, reason: 'The dashboard needs a "tiles" list. An empty list is fine; the builder adds widgets to it.' };
+  }
+  const database = raw.database ? normalizePath(raw.database.trim()) : '';
   const tiles = [];
   for (let i = 0; i < raw.tiles.length; i++) {
     const t = raw.tiles[i];
     const at = 'Tile ' + (i + 1);
     if (!t || typeof t !== 'object') return { ok: false, reason: at + ' must be a JSON object.' };
-    if (typeof t.sql !== 'string' || !t.sql.trim()) return { ok: false, reason: at + ' needs an "sql" query.' };
+    if (!VIZ_KINDS.has(t.viz)) return { ok: false, reason: at + ' needs a "viz" of line, bar, stat or table.' };
+
+    if (t.source !== undefined) {
+      /* A built widget. */
+      if (t.viz === 'table') return { ok: false, reason: at + ': a built widget draws a line, bar or stat; use an SQL tile for a table.' };
+      const check = checkWidgetSource(t.source, t.viz, at);
+      if (!check.ok) return check;
+      if (!t.source.database && !database) return { ok: false, reason: at + ' needs a database, on the widget or on the dashboard.' };
+      tiles.push({
+        title: typeof t.title === 'string' ? t.title : '',
+        viz: t.viz,
+        unit: typeof t.unit === 'string' ? t.unit : '',
+        stack: t.stack === true,
+        source: {
+          database: t.source.database ? normalizePath(t.source.database) : '',
+          table: t.source.table,
+          metric: typeof t.source.metric === 'string' ? t.source.metric : '',
+          agg: check.agg,
+          filter: t.source.filter ? { column: t.source.filter.column, value: String(t.source.filter.value) } : undefined,
+          series: t.source.series || undefined,
+          groupBy: t.source.groupBy || undefined,
+          timeColumn: t.source.timeColumn || undefined,
+          timeframe: t.source.timeframe === undefined ? 'global' : t.source.timeframe,
+        },
+      });
+      continue;
+    }
+
+    /* A raw SQL tile. */
+    if (typeof t.sql !== 'string' || !t.sql.trim()) return { ok: false, reason: at + ' needs an "sql" query or a "source".' };
     const gate = gateStatement(t.sql);
     if (!gate.ok) return { ok: false, reason: at + ': ' + gate.reason };
-    if (!VIZ_KINDS.has(t.viz)) return { ok: false, reason: at + ' needs a "viz" of line, bar, stat or table.' };
+    if (!database) return { ok: false, reason: at + ' is an SQL tile, so the dashboard needs a top-level "database".' };
     const y = Array.isArray(t.y) ? t.y.slice() : (typeof t.y === 'string' && t.y ? [t.y] : []);
     if (y.some((c) => typeof c !== 'string' || !c)) return { ok: false, reason: at + ': every "y" entry must be a column name.' };
     if ((t.viz === 'line' || t.viz === 'bar')) {
@@ -377,13 +413,79 @@ function parseDashboardSpec(text) {
       stack: t.stack === true,
     });
   }
-  return { ok: true, spec: { id: raw.id, title: raw.title.trim(), database: normalizePath(raw.database.trim()), tiles } };
+  return {
+    ok: true,
+    spec: {
+      id: raw.id,
+      title: raw.title.trim(),
+      database,
+      globalTimeframe: raw.globalTimeframe || DEFAULT_GLOBAL_TIMEFRAME,
+      tiles,
+    },
+  };
+}
+
+/* The database a tile actually reads. */
+function tileDatabase(tile, spec) {
+  return (tile.source && tile.source.database) || spec.database || '';
+}
+
+/* The SQL a tile actually runs. */
+function tileSql(tile, spec) {
+  return tile.source ? sqlForWidget(tile, spec.globalTimeframe) : tile.sql;
+}
+
+/* A parsed spec back to the JSON the builder saves. The inverse of
+ * parseDashboardSpec for everything the plugin understands; unknown keys
+ * from hand-edited files are not carried (the parser ignored them too). */
+function specToJson(spec) {
+  const out = { id: spec.id, title: spec.title };
+  if (spec.database) out.database = spec.database;
+  out.globalTimeframe = spec.globalTimeframe || DEFAULT_GLOBAL_TIMEFRAME;
+  out.tiles = spec.tiles.map((t) => {
+    const tile = {};
+    if (t.title) tile.title = t.title;
+    tile.viz = t.viz;
+    if (t.unit) tile.unit = t.unit;
+    if (t.stack) tile.stack = true;
+    if (t.source) {
+      const s = {};
+      if (t.source.database) s.database = t.source.database;
+      s.table = t.source.table;
+      if (t.source.metric) s.metric = t.source.metric;
+      s.agg = t.source.agg;
+      if (t.source.filter) s.filter = { column: t.source.filter.column, value: t.source.filter.value };
+      if (t.source.series) s.series = t.source.series;
+      if (t.source.groupBy) s.groupBy = t.source.groupBy;
+      if (t.source.timeColumn) s.timeColumn = t.source.timeColumn;
+      s.timeframe = t.source.timeframe === undefined ? 'global' : t.source.timeframe;
+      tile.source = s;
+    } else {
+      tile.sql = t.sql;
+      if (t.x) tile.x = t.x;
+      if (t.y && t.y.length) tile.y = t.y.length === 1 ? t.y[0] : t.y;
+    }
+    return tile;
+  });
+  return JSON.stringify(out, null, 2) + '\n';
 }
 
 /* Where a dashboard's computed results live in the vault, so Obsidian Sync
- * carries them to devices that cannot open the database itself. */
+ * carries them to devices that cannot open the database itself. Since
+ * 0.2.0 a dashboard can read several databases, so the cache is keyed by
+ * dashboard id; cachePathFor stays for reading a 0.1.x cache. */
 function cachePathFor(cacheFolder, dbPath, dashboardId) {
   return normalizePath(cacheFolder + '/' + stemOf(dbPath) + '/' + dashboardId + '.json');
+}
+
+function dashCachePath(cacheFolder, dashboardId) {
+  return normalizePath(cacheFolder + '/dashboards/' + dashboardId + '.json');
+}
+
+/* The catalog a desktop writes next to the cache: enough schema for the
+ * mobile picker when the database itself cannot be opened there. */
+function catalogPathFor(cacheFolder, dbPath) {
+  return normalizePath(cacheFolder + '/catalogs/' + stemOf(dbPath) + '.json');
 }
 
 /* ---------------------------------------------------- migration planning -- */
@@ -469,6 +571,170 @@ function statOf(table, tile) {
   return { value: row[yIdx], caption: captionIdx >= 0 ? String(row[captionIdx] === null ? '' : row[captionIdx]) : '' };
 }
 
+/* ------------------------------------------- widgets built without SQL -- */
+
+/* A structured widget names what it wants (database, table, metric,
+ * aggregation, slices, time) and deterministic code turns that into SQL,
+ * always through quoteIdent and quoteLiteral, always through the statement
+ * gate. One render path for hand-written SQL tiles and built widgets. */
+
+const AGGS = { sum: 'SUM', avg: 'AVG', min: 'MIN', max: 'MAX', count: 'COUNT', latest: 'LATEST' };
+const AGG_LABELS = { sum: 'Add up', avg: 'Average', min: 'Lowest', max: 'Highest', count: 'Count rows', latest: 'Latest value' };
+const PRESETS = { '7d': { days: 7 }, '30d': { days: 30 }, '90d': { days: 90 }, '12m': { months: 12 }, all: null };
+const PRESET_LABELS = { '7d': 'Last 7 days', '30d': 'Last 30 days', '90d': 'Last 90 days', '12m': 'Last 12 months', all: 'All time' };
+const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const DEFAULT_GLOBAL_TIMEFRAME = { preset: '90d' };
+
+/* Is this a usable timeframe value? 'global' means: follow the dashboard. */
+function validTimeframe(tf, allowGlobal) {
+  if (tf === undefined || tf === null) return true;
+  if (tf === 'global') return !!allowGlobal;
+  if (typeof tf !== 'object') return false;
+  if (tf.preset !== undefined) return Object.prototype.hasOwnProperty.call(PRESETS, tf.preset);
+  if (tf.from !== undefined || tf.to !== undefined) return DATE_RE.test(String(tf.from)) && DATE_RE.test(String(tf.to));
+  return false;
+}
+
+/* A widget set to "global" takes the dashboard's range; a fixed one keeps
+ * its own; nothing at all falls back to the dashboard as well. */
+function resolveTimeframe(tf, globalTf) {
+  const fallback = globalTf || DEFAULT_GLOBAL_TIMEFRAME;
+  if (tf === undefined || tf === null || tf === 'global') return fallback;
+  return tf;
+}
+
+/* The WHERE pieces for a timeframe. Presets anchor on the newest row the
+ * table has (per filter), not on today, so a chart over a data set that
+ * stopped updating still shows its last days instead of nothing. */
+function timeframeConditions({ table, timeColumn, frame, filterCond }) {
+  if (!timeColumn || !frame) return [];
+  if (frame.preset !== undefined) {
+    const span = PRESETS[frame.preset];
+    if (!span) return []; /* 'all' */
+    const modifier = span.days ? '-' + span.days + ' day' : '-' + span.months + ' month';
+    const anchor = '(SELECT MAX(' + quoteIdent(timeColumn) + ') FROM ' + quoteIdent(table) + (filterCond ? ' WHERE ' + filterCond : '') + ')';
+    return [quoteIdent(timeColumn) + ' >= date(' + anchor + ", '" + modifier + "')"];
+  }
+  return [
+    quoteIdent(timeColumn) + ' >= ' + quoteLiteral(frame.from),
+    quoteIdent(timeColumn) + ' <= ' + quoteLiteral(frame.to),
+  ];
+}
+
+/* Descriptor to SQL. Charts come back as (x[, series], value); stats as a
+ * single value row. Pure and deterministic: the same descriptor and the
+ * same global range always produce the same string. */
+function sqlForWidget(tile, globalTf) {
+  const s = tile.source;
+  const table = quoteIdent(s.table);
+  const filterCond = s.filter ? quoteIdent(s.filter.column) + ' = ' + quoteLiteral(s.filter.value) : '';
+  const conds = filterCond ? [filterCond] : [];
+  const frame = resolveTimeframe(s.timeframe, globalTf);
+  conds.push(...timeframeConditions({ table: s.table, timeColumn: s.timeColumn, frame, filterCond }));
+  const where = conds.length ? ' WHERE ' + conds.join(' AND ') : '';
+
+  if (tile.viz === 'stat') {
+    if (s.agg === 'latest') {
+      return 'SELECT ' + quoteIdent(s.metric) + ' AS value' + (s.timeColumn ? ', ' + quoteIdent(s.timeColumn) + ' AS at' : '') +
+        ' FROM ' + table + where +
+        (s.timeColumn ? ' ORDER BY ' + quoteIdent(s.timeColumn) + ' DESC' : '') + ' LIMIT 1';
+    }
+    const expr = s.agg === 'count' ? 'COUNT(*)' : AGGS[s.agg] + '(' + quoteIdent(s.metric) + ')';
+    return 'SELECT ' + expr + ' AS value FROM ' + table + where;
+  }
+
+  const groupBy = s.groupBy || s.timeColumn;
+  const expr = s.agg === 'count' ? 'COUNT(*)' : AGGS[s.agg] + '(' + quoteIdent(s.metric) + ')';
+  let sql = 'SELECT ' + quoteIdent(groupBy) + ' AS x';
+  if (s.series) sql += ', ' + quoteIdent(s.series) + ' AS series';
+  sql += ', ' + expr + ' AS value FROM ' + table + where;
+  sql += ' GROUP BY ' + quoteIdent(groupBy) + (s.series ? ', ' + quoteIdent(s.series) : '');
+  sql += ' ORDER BY ' + quoteIdent(groupBy);
+  return sql;
+}
+
+/* Long (x, series, value) rows to wide columns, one per series, so the
+ * chart renderer sees the same shape a hand-written multi-column query
+ * produces. Series are ordered by total, biggest first, capped at 8. */
+function pivotSeries(table) {
+  const xi = columnIndex(table.columns, 'x');
+  const si = columnIndex(table.columns, 'series');
+  const vi = columnIndex(table.columns, 'value');
+  if (xi < 0 || si < 0 || vi < 0) return table;
+  const totals = new Map();
+  for (const row of table.rows) {
+    const key = String(row[si]);
+    totals.set(key, (totals.get(key) || 0) + (Number(row[vi]) || 0));
+  }
+  const names = [...totals.keys()].sort((a, b) => (totals.get(b) || 0) - (totals.get(a) || 0)).slice(0, 8);
+  const index = new Map(names.map((n, i) => [n, i]));
+  const xOrder = [];
+  const byX = new Map();
+  for (const row of table.rows) {
+    const x = row[xi];
+    const key = String(x);
+    if (!byX.has(key)) { byX.set(key, new Array(names.length).fill(null)); xOrder.push(x); }
+    const slot = index.get(String(row[si]));
+    if (slot !== undefined) byX.get(key)[slot] = row[vi];
+  }
+  return { columns: ['x', ...names], rows: xOrder.map((x) => [x, ...byX.get(String(x))]) };
+}
+
+/* What the renderer needs for any tile: the tile's own axes for a raw SQL
+ * tile, generated axes (and a pivot when there is a series) for a built
+ * one. Pure, so the live path and the cache path share it. */
+function prepareTileForRender(tile, table) {
+  if (!tile.source) return { spec: tile, table };
+  if (tile.viz === 'stat') {
+    return { spec: { title: tile.title, viz: 'stat', y: ['value'], unit: tile.unit }, table };
+  }
+  if (tile.source.series) {
+    const wide = pivotSeries(table);
+    return {
+      spec: { title: tile.title, viz: tile.viz, x: 'x', y: wide.columns.slice(1), unit: tile.unit, stack: tile.stack },
+      table: wide,
+    };
+  }
+  return { spec: { title: tile.title, viz: tile.viz, x: 'x', y: ['value'], unit: tile.unit, stack: false }, table };
+}
+
+/* Validate one structured source. Returns { ok } or { ok, reason }. */
+function checkWidgetSource(s, viz, at) {
+  if (!s || typeof s !== 'object') return { ok: false, reason: at + ': "source" must be an object.' };
+  if (typeof s.table !== 'string' || !s.table) return { ok: false, reason: at + ' needs a "table".' };
+  const agg = s.agg === undefined ? 'sum' : s.agg;
+  if (!AGGS[agg]) return { ok: false, reason: at + ': "agg" must be one of sum, avg, min, max, count, latest.' };
+  if (agg !== 'count' && (typeof s.metric !== 'string' || !s.metric)) return { ok: false, reason: at + ' needs a "metric" column.' };
+  if (agg === 'latest' && viz !== 'stat') return { ok: false, reason: at + ': "latest" only works on a stat widget.' };
+  if (s.filter !== undefined) {
+    if (!s.filter || typeof s.filter.column !== 'string' || !s.filter.column || s.filter.value === undefined) {
+      return { ok: false, reason: at + ': "filter" needs a column and a value.' };
+    }
+  }
+  if (s.series !== undefined && (typeof s.series !== 'string' || !s.series)) return { ok: false, reason: at + ': "series" must be a column name.' };
+  if (s.series && viz === 'stat') return { ok: false, reason: at + ': a stat widget cannot be split into series.' };
+  if (s.groupBy !== undefined && (typeof s.groupBy !== 'string' || !s.groupBy)) return { ok: false, reason: at + ': "groupBy" must be a column name.' };
+  if (s.timeColumn !== undefined && (typeof s.timeColumn !== 'string' || !s.timeColumn)) return { ok: false, reason: at + ': "timeColumn" must be a column name.' };
+  if (!validTimeframe(s.timeframe, true)) return { ok: false, reason: at + ': "timeframe" must be "global", a preset like {"preset":"90d"}, or {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}.' };
+  if (viz !== 'stat' && !s.groupBy && !s.timeColumn) return { ok: false, reason: at + ' needs a "groupBy" or a "timeColumn" to chart over.' };
+  if (s.database !== undefined && (typeof s.database !== 'string' || !s.database)) return { ok: false, reason: at + ': "database" must be a vault path.' };
+  return { ok: true, agg };
+}
+
+/* Column-type helpers for the picker and the catalog. */
+function isNumericType(type) { return /INT|REAL|FLOA|DOUB|NUM|DEC/i.test(String(type || '')); }
+function isTextType(type) { const t = String(type || ''); return t === '' || /CHAR|TEXT|CLOB/i.test(t); }
+
+/* A friendly guess at the time column: the names Tom's tables actually
+ * use, most specific first. Just a default; the picker lets it change. */
+function guessTimeColumn(columns) {
+  const names = columns.map((c) => c.name);
+  for (const exact of ['local_date', 'batch_id', 'snapshot_date', 'period_end']) {
+    if (names.includes(exact)) return exact;
+  }
+  return names.find((n) => /date|_at$|^at$|timestamp|day|week|month/i.test(n)) || '';
+}
+
 /* ========================================================================
  * 2. THE ENGINES
  * ====================================================================== */
@@ -508,10 +774,13 @@ function detectCli(deps, bin) {
 
 /* ENGINE A: one sqlite3 process per query. The SQL is an argument, never a
  * shell string. Read-only twice over: the -readonly flag and mode=ro in the
- * URI. A query that runs too long is killed, and says so in plain words. */
+ * URI. A busy timeout retries for a few seconds when another app is
+ * writing to the database at that moment (live gate: the engagement loop
+ * held a write lock and every tile failed with "database is locked").
+ * A query that runs too long is killed, and says so in plain words. */
 function cliQuery(deps, { bin, absPath, sql, timeoutMs, maxBuffer }) {
   return new Promise((resolve, reject) => {
-    const args = ['-readonly', '-json', dbFileUri(absPath), sql];
+    const args = ['-readonly', '-json', '-cmd', '.timeout 5000', dbFileUri(absPath), sql];
     deps.childProcess.execFile(
       bin || 'sqlite3',
       args,
@@ -522,7 +791,10 @@ function cliQuery(deps, { bin, absPath, sql, timeoutMs, maxBuffer }) {
             reject(new Error('The query was stopped after ' + Math.round((timeoutMs || 30000) / 1000) + ' seconds. Narrow it down, for example with a date range or a LIMIT.'));
             return;
           }
-          const detail = String(stderr || err.message || '').trim().replace(/^Error:\s*/i, '');
+          let detail = String(stderr || err.message || '').trim().replace(/^Error:\s*/i, '');
+          if (/database is locked|database table is locked/i.test(detail)) {
+            detail += '. Another app is writing to this database right now; try again in a moment.';
+          }
           reject(new Error(detail || 'The query failed.'));
           return;
         }
@@ -1323,6 +1595,11 @@ class SqliteDashboardsView extends ItemView {
     console.error('ICOR SQLite Viewer: dashboards failed to render', e);
   }
 
+  async saveAndRender(spec) {
+    await this.plugin.saveDashboardSpec(spec);
+    this.render();
+  }
+
   render() {
     const root = this.contentEl;
     root.empty();
@@ -1330,6 +1607,7 @@ class SqliteDashboardsView extends ItemView {
     const bar = root.createDiv({ cls: 'icor-sqlv-dash-bar' });
     if (this.specs.length) {
       const select = bar.createEl('select', { cls: 'dropdown' });
+      select.setAttribute('aria-label', 'Dashboard');
       for (const spec of this.specs) {
         const opt = select.createEl('option', { text: spec.title });
         opt.value = spec.id;
@@ -1337,6 +1615,12 @@ class SqliteDashboardsView extends ItemView {
       }
       select.addEventListener('change', () => { this.activeId = select.value; this.render(); });
     }
+    const newBtn = bar.createEl('button', { text: 'New dashboard' });
+    newBtn.addEventListener('click', async () => {
+      const spec = await this.plugin.createDashboard();
+      this.activeId = spec.id;
+      await this.reload();
+    });
     const refresh = bar.createEl('button', { text: 'Refresh' });
     refresh.addEventListener('click', () => this.reload());
 
@@ -1344,7 +1628,14 @@ class SqliteDashboardsView extends ItemView {
       root.createDiv({ cls: 'icor-sqlv-error', text: err.path + ': ' + err.reason });
     }
     if (!this.specs.length) {
-      root.createDiv({ cls: 'icor-sqlv-note', text: 'No dashboards found in ' + this.plugin.settings.dashboardFolder + '. The folder has a README that explains the file format.' });
+      const empty = root.createDiv({ cls: 'icor-sqlv-blank' });
+      empty.createDiv({ text: 'No dashboards yet.' });
+      const start = empty.createEl('button', { text: 'Create your first dashboard', cls: 'mod-cta' });
+      start.addEventListener('click', async () => {
+        const spec = await this.plugin.createDashboard();
+        this.activeId = spec.id;
+        await this.reload();
+      });
       return;
     }
     const spec = this.specs.find((s) => s.id === this.activeId);
@@ -1357,8 +1648,10 @@ class SqliteDashboardsView extends ItemView {
 
   async renderDashboard(root, spec) {
     const host = root.createDiv({ cls: 'icor-sqlv-dash' });
-    const status = host.createDiv({ cls: 'icor-sqlv-note' });
+    this.renderHeader(host, spec);
+    const status = host.createDiv({ cls: 'icor-sqlv-note icor-sqlv-dash-status' });
     const grid = host.createDiv({ cls: 'icor-sqlv-grid' });
+    this.appendAddTile(grid, spec);
     try {
       await this.renderDashboardInto(spec, status, grid);
     } catch (e) {
@@ -1366,58 +1659,676 @@ class SqliteDashboardsView extends ItemView {
     }
   }
 
-  async renderDashboardInto(spec, status, grid) {
-    const choice = await this.plugin.query.engineFor(spec.database);
+  /* The dashboard header: the title, editable in place, and the global
+   * range every widget set to "follow the dashboard" obeys. */
+  renderHeader(host, spec) {
+    const header = host.createDiv({ cls: 'icor-sqlv-dash-header' });
+    const titleWrap = header.createDiv({ cls: 'icor-sqlv-dash-title' });
+    const title = titleWrap.createEl('h2', { text: spec.title, cls: 'icor-sqlv-dash-title-text' });
+    title.setAttribute('title', 'Click to rename');
+    title.setAttribute('role', 'button');
+    title.setAttribute('tabindex', '0');
+    title.setAttribute('aria-label', 'Rename dashboard ' + spec.title);
+    const startRename = () => {
+      titleWrap.empty();
+      const input = titleWrap.createEl('input', { type: 'text', cls: 'icor-sqlv-dash-title-input', value: spec.title });
+      input.setAttribute('aria-label', 'Dashboard title');
+      const commit = async () => {
+        const next = input.value.trim();
+        if (next && next !== spec.title) {
+          spec.title = next;
+          await this.saveAndRender(spec);
+        } else {
+          this.render();
+        }
+      };
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); commit(); }
+        if (ev.key === 'Escape') { ev.preventDefault(); this.render(); }
+      });
+      input.addEventListener('blur', commit);
+      input.focus();
+      if (typeof input.select === 'function') input.select();
+    };
+    title.addEventListener('click', startRename);
+    title.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); startRename(); } });
 
-    if (choice.engine) {
-      const cachedTiles = [];
-      let failed = 0;
-      const t0 = Date.now();
-      for (let i = 0; i < spec.tiles.length; i++) {
-        const tile = spec.tiles[i];
-        status.setText('Running query ' + (i + 1) + ' of ' + spec.tiles.length + (tile.title ? ': ' + tile.title : '') + ' …');
-        const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
+    const range = header.createDiv({ cls: 'icor-sqlv-range' });
+    range.createSpan({ cls: 'icor-sqlv-range-label', text: 'Range' });
+    const select = range.createEl('select', { cls: 'dropdown' });
+    select.setAttribute('aria-label', 'Time range for the whole dashboard');
+    const current = spec.globalTimeframe || DEFAULT_GLOBAL_TIMEFRAME;
+    for (const [key, label] of Object.entries(PRESET_LABELS)) {
+      const opt = select.createEl('option', { text: label });
+      opt.value = key;
+      if (current.preset === key) opt.selected = true;
+    }
+    const customOpt = select.createEl('option', { text: 'Custom range' });
+    customOpt.value = 'custom';
+    if (current.from) customOpt.selected = true;
+    const customWrap = range.createDiv({ cls: 'icor-sqlv-range-custom' });
+    const buildCustom = () => {
+      customWrap.empty();
+      const from = customWrap.createEl('input', { type: 'date', value: current.from || '' });
+      from.setAttribute('aria-label', 'From date');
+      const to = customWrap.createEl('input', { type: 'date', value: current.to || '' });
+      to.setAttribute('aria-label', 'To date');
+      const apply = customWrap.createEl('button', { text: 'Apply' });
+      apply.addEventListener('click', async () => {
+        if (DATE_RE.test(from.value) && DATE_RE.test(to.value)) {
+          spec.globalTimeframe = { from: from.value, to: to.value };
+          await this.saveAndRender(spec);
+        } else {
+          new Notice('Pick both dates first.');
+        }
+      });
+    };
+    if (current.from) buildCustom();
+    select.addEventListener('change', async () => {
+      if (select.value === 'custom') { buildCustom(); return; }
+      spec.globalTimeframe = { preset: select.value };
+      await this.saveAndRender(spec);
+    });
+  }
+
+  /* The + tile that starts the widget wizard. CSS keeps it last. */
+  appendAddTile(grid, spec) {
+    const add = grid.createDiv({ cls: 'icor-sqlv-tile icor-sqlv-add-tile' });
+    add.setAttribute('role', 'button');
+    add.setAttribute('tabindex', '0');
+    add.setAttribute('aria-label', 'Add a widget');
+    const plus = add.createDiv({ cls: 'icor-sqlv-add-plus' });
+    setIcon(plus, 'plus');
+    add.createDiv({ cls: 'icor-sqlv-add-text', text: 'Add widget' });
+    const start = () => new WidgetWizard(this.plugin, this, spec, -1).open();
+    add.addEventListener('click', start);
+    add.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); start(); } });
+  }
+
+  /* Edit and remove, in the corner of every widget. */
+  addTileActions(tileEl, spec, index) {
+    const tile = spec.tiles[index];
+    const actions = tileEl.createDiv({ cls: 'icor-sqlv-tile-actions' });
+    const edit = actions.createEl('button', { cls: 'icor-sqlv-tile-action' });
+    setIcon(edit, 'pencil');
+    edit.setAttribute('aria-label', 'Edit this widget');
+    edit.setAttribute('title', 'Edit');
+    edit.addEventListener('click', () => {
+      if (tile.source) new WidgetWizard(this.plugin, this, spec, index).open();
+      else new RawTileModal(this.plugin, this, spec, index).open();
+    });
+    const remove = actions.createEl('button', { cls: 'icor-sqlv-tile-action' });
+    setIcon(remove, 'trash-2');
+    remove.setAttribute('aria-label', 'Remove this widget');
+    remove.setAttribute('title', 'Remove');
+    remove.addEventListener('click', () => {
+      new ConfirmModal(this.plugin.app, {
+        title: 'Remove this widget?',
+        body: 'The widget "' + (tile.title || 'Untitled') + '" is removed from the dashboard. The data it showed is not touched.',
+        cta: 'Remove',
+        onConfirm: async () => {
+          spec.tiles.splice(index, 1);
+          await this.saveAndRender(spec);
+        },
+      }).open();
+    });
+  }
+
+  async renderDashboardInto(spec, status, grid) {
+    const cache = await this.plugin.readDashboardCache(spec);
+    const engines = new Map();
+    const engineOf = async (db) => {
+      if (!engines.has(db)) engines.set(db, await this.plugin.query.engineFor(db));
+      return engines.get(db);
+    };
+    const cachedTiles = [];
+    let failed = 0;
+    let fromCache = 0;
+    const t0 = Date.now();
+
+    for (let i = 0; i < spec.tiles.length; i++) {
+      const tile = spec.tiles[i];
+      status.setText('Running query ' + (i + 1) + ' of ' + spec.tiles.length + (tile.title ? ': ' + tile.title : '') + ' …');
+      const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
+      this.addTileActions(tileEl, spec, i);
+      const db = tileDatabase(tile, spec);
+      if (!db) {
+        failed++;
+        tileEl.createDiv({ cls: 'icor-sqlv-error', text: 'This widget names no database. Edit it and pick one.' });
+        continue;
+      }
+      const choice = await engineOf(db);
+      if (choice.engine) {
         try {
-          const res = await this.plugin.query.query(spec.database, tile.sql, { cap: 5000 });
-          renderTile(tileEl, tile, res);
+          const sql = tileSql(tile, spec);
+          const res = await this.plugin.query.query(db, sql, { cap: 5000 });
+          const prepared = prepareTileForRender(tile, res);
+          renderTile(tileEl, prepared.spec, prepared.table);
           cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows }));
+          this.plugin.maybeWriteCatalog(db);
         } catch (e) {
           failed++;
           if (tile.title) tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tile.title });
           tileEl.createDiv({ cls: 'icor-sqlv-error', text: e.message });
         }
+        continue;
       }
-      let line = 'Live from ' + spec.database + ', ' + spec.tiles.length + (spec.tiles.length === 1 ? ' query' : ' queries') + ' in ' + (Date.now() - t0) + ' ms.';
-      if (failed) line = 'Live from ' + spec.database + '. ' + failed + ' of ' + spec.tiles.length + ' queries failed; the errors are shown in their tiles.';
-      /* The cache the phone will render from. Only a fully healthy run is
-       * worth freezing; a half-broken one would overwrite a good cache. */
-      if (!failed && Platform.isDesktopApp) {
+      /* No engine for this database on this device: the desktop cache. */
+      const cachedTile = cache && cache.tiles[i];
+      if (cachedTile) {
         try {
-          await this.plugin.writeDashboardCache(spec, cachedTiles);
+          const prepared = prepareTileForRender(cachedTile, { columns: cachedTile.columns, rows: cachedTile.rows });
+          renderTile(tileEl, prepared.spec, prepared.table);
+          tileEl.createDiv({ cls: 'icor-sqlv-note', text: 'Computed on desktop, ' + relativeTime(cache.computedAt) + '.' });
+          fromCache++;
         } catch (e) {
-          line += ' The cache could not be written: ' + e.message;
+          failed++;
+          tileEl.createDiv({ cls: 'icor-sqlv-error', text: e.message });
         }
+      } else {
+        if (tile.title) tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tile.title });
+        tileEl.createDiv({ cls: 'icor-sqlv-note', text: (choice.reason || 'This database cannot be opened here.') + ' No cached result yet. Open this dashboard once on the desktop and sync.' });
       }
-      status.setText(line);
-      return;
     }
 
-    /* No engine for this database here: render from the desktop cache. */
-    const cache = await this.plugin.readDashboardCache(spec);
-    if (!cache) {
-      status.setText((choice.reason || 'This database cannot be opened here.') + ' No cached results yet. Open this dashboard once on the desktop and sync.');
+    if (!spec.tiles.length) {
+      status.setText('An empty dashboard. Add the first widget with the + tile.');
       return;
     }
-    status.setText('Computed on desktop, ' + relativeTime(cache.computedAt) + '. ' + (choice.reason || ''));
-    for (const tile of cache.tiles) {
-      const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
+    let line;
+    if (failed) {
+      line = failed + ' of ' + spec.tiles.length + ' widgets failed; the errors are shown in their tiles.';
+    } else if (fromCache === spec.tiles.length) {
+      line = 'Computed on desktop, ' + (cache ? relativeTime(cache.computedAt) : 'at an unknown time') + '.';
+    } else if (fromCache > 0) {
+      line = (spec.tiles.length - fromCache) + ' live, ' + fromCache + ' from the desktop cache.';
+    } else {
+      line = spec.tiles.length + (spec.tiles.length === 1 ? ' query' : ' queries') + ' in ' + (Date.now() - t0) + ' ms.';
+    }
+    /* The cache the phone renders from. Only a fully live, fully healthy
+     * run is worth freezing; anything less would overwrite a good cache. */
+    if (!failed && !fromCache && Platform.isDesktopApp) {
       try {
-        renderTile(tileEl, tile, { columns: tile.columns, rows: tile.rows });
+        await this.plugin.writeDashboardCache(spec, cachedTiles);
       } catch (e) {
-        tileEl.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+        line += ' The cache could not be written: ' + e.message;
+      }
+    }
+    status.setText(line);
+  }
+}
+
+/* ------------------------------------------------------ builder modals -- */
+
+/* A plain confirm dialog, so nothing ever falls back to window.confirm. */
+class ConfirmModal extends Modal {
+  constructor(app, { title, body, cta, onConfirm }) {
+    super(app);
+    this.opts = { title, body, cta, onConfirm };
+  }
+  onOpen() {
+    this.titleEl.setText(this.opts.title);
+    this.contentEl.empty();
+    this.contentEl.createDiv({ text: this.opts.body });
+    const bar = this.contentEl.createDiv({ cls: 'icor-sqlv-console-bar icor-sqlv-modal-bar' });
+    const go = bar.createEl('button', { text: this.opts.cta, cls: 'mod-warning' });
+    go.addEventListener('click', async () => { this.close(); await this.opts.onConfirm(); });
+    const cancel = bar.createEl('button', { text: 'Cancel' });
+    cancel.addEventListener('click', () => this.close());
+  }
+  onClose() { this.contentEl.empty(); }
+}
+
+/* THE WIDGET WIZARD. One question per screen, plain words, touch-sized
+ * rows: database, table, what to measure, how to add it up, how to split
+ * it, when, how it should look. Editing an existing widget starts with its
+ * answers filled in. */
+class WidgetWizard extends Modal {
+  constructor(plugin, view, spec, editIndex) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.view = view;
+    this.spec = spec;
+    this.editIndex = editIndex;
+    const existing = editIndex >= 0 ? spec.tiles[editIndex] : null;
+    const src = existing && existing.source ? existing.source : {};
+    this.state = {
+      database: src.database || spec.database || '',
+      table: src.table || '',
+      metric: src.metric || '',
+      agg: src.agg || 'sum',
+      filter: src.filter ? { column: src.filter.column, value: src.filter.value } : null,
+      series: src.series || '',
+      timeColumn: src.timeColumn || '',
+      timeframe: existing ? (src.timeframe === undefined ? 'global' : src.timeframe) : 'global',
+      viz: existing ? existing.viz : 'line',
+      stack: existing ? !!existing.stack : false,
+      title: existing ? existing.title : '',
+      unit: existing ? existing.unit : '',
+    };
+    this.schema = null; /* { live, tables } for state.database */
+    this.step = 'database';
+  }
+
+  onOpen() {
+    this.modalEl.addClass('icor-sqlv-wizard-modal');
+    this.renderStep();
+  }
+  onClose() { this.contentEl.empty(); }
+
+  tableInfo() { return this.schema ? this.schema.tables.find((t) => t.name === this.state.table) : null; }
+
+  /* One tappable row in a wizard list. */
+  row(listEl, { label, detail, onPick, selected }) {
+    const row = listEl.createDiv({ cls: 'icor-sqlv-wizard-row' + (selected ? ' is-selected' : '') });
+    row.setAttribute('role', 'button');
+    row.setAttribute('tabindex', '0');
+    row.createDiv({ cls: 'icor-sqlv-wizard-row-label', text: label });
+    if (detail) row.createDiv({ cls: 'icor-sqlv-wizard-row-detail', text: detail });
+    const pick = () => onPick();
+    row.addEventListener('click', pick);
+    row.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); pick(); } });
+    return row;
+  }
+
+  frame({ heading, sub, back }) {
+    this.titleEl.setText(this.editIndex >= 0 ? 'Edit widget' : 'New widget');
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass('icor-sqlv-wizard');
+    const crumbs = [];
+    if (this.state.database) crumbs.push(baseName(this.state.database));
+    if (this.state.table) crumbs.push(this.state.table);
+    if (this.state.filter) crumbs.push(this.state.filter.value);
+    else if (this.state.metric && this.step !== 'measure') crumbs.push(this.state.metric);
+    if (crumbs.length) contentEl.createDiv({ cls: 'icor-sqlv-wizard-crumbs', text: crumbs.join('  ›  ') });
+    contentEl.createDiv({ cls: 'icor-sqlv-wizard-heading', text: heading });
+    if (sub) contentEl.createDiv({ cls: 'icor-sqlv-note', text: sub });
+    const body = contentEl.createDiv({ cls: 'icor-sqlv-wizard-body' });
+    const bar = contentEl.createDiv({ cls: 'icor-sqlv-console-bar icor-sqlv-modal-bar' });
+    if (back) {
+      const b = bar.createEl('button', { text: 'Back' });
+      b.addEventListener('click', () => { this.step = back; this.renderStep(); });
+    }
+    const cancel = bar.createEl('button', { text: 'Cancel' });
+    cancel.addEventListener('click', () => this.close());
+    return { body, bar };
+  }
+
+  fail(body, e) {
+    body.empty();
+    body.createDiv({ cls: 'icor-sqlv-error', text: String((e && e.message) || e) });
+  }
+
+  renderStep() {
+    const step = this.step;
+    if (step === 'database') this.stepDatabase();
+    else if (step === 'table') this.stepTable();
+    else if (step === 'measure') this.stepMeasure();
+    else if (step === 'value') this.stepValue();
+    else if (step === 'metric-for-filter') this.stepMetricForFilter();
+    else if (step === 'agg') this.stepAgg();
+    else if (step === 'series') this.stepSeries();
+    else if (step === 'time') this.stepTime();
+    else this.stepLook();
+  }
+
+  stepDatabase() {
+    const { body } = this.frame({ heading: 'Which database?' });
+    const dbs = this.plugin.vaultDatabases();
+    if (!dbs.length) { body.createDiv({ cls: 'icor-sqlv-note', text: 'No databases found in this vault.' }); return; }
+    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    for (const db of dbs) {
+      this.row(list, {
+        label: baseName(db.path),
+        detail: db.path + '  ·  ' + formatBytes(db.size),
+        selected: db.path === this.state.database,
+        onPick: async () => {
+          this.state.database = db.path;
+          this.state.table = '';
+          this.schema = null;
+          this.step = 'table';
+          this.renderStep();
+        },
+      });
+    }
+  }
+
+  async stepTable() {
+    const { body } = this.frame({ heading: 'Which table?', back: 'database' });
+    body.createDiv({ cls: 'icor-sqlv-note', text: 'Reading the schema …' });
+    try {
+      if (!this.schema) this.schema = await this.plugin.schemaFor(this.state.database);
+    } catch (e) { this.fail(body, e); return; }
+    if (this.step !== 'table') return;
+    body.empty();
+    if (!this.schema.live) {
+      body.createDiv({ cls: 'icor-sqlv-note', text: 'This database cannot be opened on this device; the picker uses the catalog the desktop wrote ' + (this.schema.computedAt ? relativeTime(this.schema.computedAt) : '') + '. The widget will show data after the next desktop pass.' });
+    }
+    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    for (const t of this.schema.tables) {
+      this.row(list, {
+        label: t.name,
+        detail: t.columns.length + ' columns',
+        selected: t.name === this.state.table,
+        onPick: () => {
+          if (this.state.table !== t.name) { this.state.metric = ''; this.state.filter = null; this.state.series = ''; }
+          this.state.table = t.name;
+          this.state.timeColumn = this.state.timeColumn && t.columns.some((c) => c.name === this.state.timeColumn)
+            ? this.state.timeColumn : guessTimeColumn(t.columns);
+          this.step = 'measure';
+          this.renderStep();
+        },
+      });
+    }
+  }
+
+  stepMeasure() {
+    const { body } = this.frame({
+      heading: 'What should be measured?',
+      sub: 'Pick a number column, or start from a category to narrow the rows down first.',
+      back: 'table',
+    });
+    const table = this.tableInfo();
+    if (!table) { this.step = 'table'; this.renderStep(); return; }
+    const numbers = table.columns.filter((c) => isNumericType(c.type));
+    const texts = table.columns.filter((c) => isTextType(c.type));
+    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    this.row(list, {
+      label: 'Count rows',
+      detail: 'How many rows match',
+      onPick: () => { this.state.metric = ''; this.state.agg = 'count'; this.state.filter = null; this.step = 'series'; this.renderStep(); },
+    });
+    if (numbers.length) {
+      body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Numbers' });
+      const numList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+      for (const c of numbers) {
+        this.row(numList, {
+          label: c.name,
+          detail: c.type,
+          selected: !this.state.filter && this.state.metric === c.name,
+          onPick: () => { this.state.metric = c.name; this.state.filter = null; if (this.state.agg === 'count') this.state.agg = 'sum'; this.step = 'agg'; this.renderStep(); },
+        });
+      }
+    }
+    if (texts.length) {
+      body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Categories (narrow down first)' });
+      const catList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+      for (const c of texts) {
+        this.row(catList, {
+          label: c.name,
+          detail: 'pick one of its values',
+          selected: !!this.state.filter && this.state.filter.column === c.name,
+          onPick: () => { this.state.filter = { column: c.name, value: '' }; this.step = 'value'; this.renderStep(); },
+        });
       }
     }
   }
+
+  async stepValue() {
+    const { body } = this.frame({ heading: 'Which ' + this.state.filter.column + '?', back: 'measure' });
+    body.createDiv({ cls: 'icor-sqlv-note', text: 'Reading the values …' });
+    let values;
+    try {
+      values = await this.plugin.distinctValues(this.state.database, this.state.table, this.state.filter.column);
+    } catch (e) { this.fail(body, e); return; }
+    if (this.step !== 'value') return;
+    body.empty();
+    if (values.truncated) body.createDiv({ cls: 'icor-sqlv-note', text: 'Showing the first 200 values.' });
+    const search = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-search' });
+    search.setAttribute('placeholder', 'Type to narrow the list');
+    search.setAttribute('aria-label', 'Filter values');
+    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    const draw = () => {
+      list.empty();
+      const needle = search.value.trim().toLowerCase();
+      for (const v of values.values) {
+        if (needle && !v.toLowerCase().includes(needle)) continue;
+        this.row(list, {
+          label: v,
+          selected: this.state.filter.value === v,
+          onPick: () => {
+            this.state.filter.value = v;
+            const table = this.tableInfo();
+            const numbers = table.columns.filter((c) => isNumericType(c.type));
+            const preferred = numbers.find((c) => /^(qty|value|amount|n)$/i.test(c.name)) || (numbers.length === 1 ? numbers[0] : null);
+            if (preferred) { this.state.metric = preferred.name; this.step = 'agg'; }
+            else if (!numbers.length) { this.state.metric = ''; this.state.agg = 'count'; this.step = 'series'; }
+            else this.step = 'metric-for-filter';
+            this.renderStep();
+          },
+        });
+      }
+    };
+    search.addEventListener('input', draw);
+    draw();
+  }
+
+  stepMetricForFilter() {
+    const { body } = this.frame({ heading: 'Which number should be measured?', back: 'value' });
+    const table = this.tableInfo();
+    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    for (const c of table.columns.filter((col) => isNumericType(col.type))) {
+      this.row(list, {
+        label: c.name,
+        detail: c.type,
+        selected: this.state.metric === c.name,
+        onPick: () => { this.state.metric = c.name; if (this.state.agg === 'count') this.state.agg = 'sum'; this.step = 'agg'; this.renderStep(); },
+      });
+    }
+  }
+
+  stepAgg() {
+    const { body } = this.frame({
+      heading: 'How should it be added up?',
+      sub: 'When several rows fall on the same point, this decides what the point shows.',
+      back: this.state.filter ? 'value' : 'measure',
+    });
+    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    for (const [agg, label] of Object.entries(AGG_LABELS)) {
+      if (agg === 'count') continue;
+      this.row(list, {
+        label,
+        detail: agg === 'latest' ? 'one number, the newest row (stat only)' : '',
+        selected: this.state.agg === agg,
+        onPick: () => {
+          this.state.agg = agg;
+          if (agg === 'latest') { this.state.viz = 'stat'; this.state.series = ''; }
+          this.step = agg === 'latest' ? 'time' : 'series';
+          this.renderStep();
+        },
+      });
+    }
+  }
+
+  stepSeries() {
+    const { body } = this.frame({
+      heading: 'Split it into series?',
+      sub: 'One line or bar per value of a category, for example one per workout type.',
+      back: this.state.agg === 'count' ? 'measure' : 'agg',
+    });
+    const table = this.tableInfo();
+    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    this.row(list, {
+      label: 'No split',
+      selected: !this.state.series,
+      onPick: () => { this.state.series = ''; this.step = 'time'; this.renderStep(); },
+    });
+    for (const c of table.columns.filter((col) => isTextType(col.type))) {
+      if (this.state.filter && c.name === this.state.filter.column) continue;
+      this.row(list, {
+        label: 'By ' + c.name,
+        selected: this.state.series === c.name,
+        onPick: () => { this.state.series = c.name; if (this.state.viz === 'stat') this.state.viz = 'bar'; this.step = 'time'; this.renderStep(); },
+      });
+    }
+  }
+
+  stepTime() {
+    const { body } = this.frame({
+      heading: 'When?',
+      sub: 'Which column holds the time, and how far back to look.',
+      back: this.state.agg === 'latest' ? 'agg' : 'series',
+    });
+    const table = this.tableInfo();
+    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Time column' });
+    const colList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    const timeCandidates = table.columns.filter((c) => isTextType(c.type) || /INT/i.test(String(c.type)));
+    for (const c of timeCandidates) {
+      this.row(colList, {
+        label: c.name,
+        selected: this.state.timeColumn === c.name,
+        onPick: () => { this.state.timeColumn = c.name; this.renderStep(); },
+      });
+    }
+    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Period' });
+    const frameList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
+    const pickFrame = (tf) => { this.state.timeframe = tf; this.step = 'look'; this.renderStep(); };
+    this.row(frameList, {
+      label: 'Follow the dashboard',
+      detail: 'uses the range picker at the top',
+      selected: this.state.timeframe === 'global',
+      onPick: () => pickFrame('global'),
+    });
+    for (const [key, label] of Object.entries(PRESET_LABELS)) {
+      this.row(frameList, {
+        label,
+        selected: !!(this.state.timeframe && this.state.timeframe.preset === key),
+        onPick: () => pickFrame({ preset: key }),
+      });
+    }
+    const custom = body.createDiv({ cls: 'icor-sqlv-range-custom' });
+    const cur = this.state.timeframe && this.state.timeframe.from ? this.state.timeframe : {};
+    const from = custom.createEl('input', { type: 'date', value: cur.from || '' });
+    from.setAttribute('aria-label', 'From date');
+    const to = custom.createEl('input', { type: 'date', value: cur.to || '' });
+    to.setAttribute('aria-label', 'To date');
+    const apply = custom.createEl('button', { text: 'Use these dates' });
+    apply.addEventListener('click', () => {
+      if (DATE_RE.test(from.value) && DATE_RE.test(to.value)) pickFrame({ from: from.value, to: to.value });
+      else new Notice('Pick both dates first.');
+    });
+  }
+
+  stepLook() {
+    const { body, bar } = this.frame({ heading: 'How should it look?', back: 'time' });
+    const vizList = body.createDiv({ cls: 'icor-sqlv-wizard-list icor-sqlv-viz-list' });
+    const vizOptions = this.state.agg === 'latest'
+      ? [['stat', 'One big number']]
+      : [['line', 'Line chart'], ['bar', 'Bar chart'], ['stat', 'One big number']];
+    for (const [viz, label] of vizOptions) {
+      this.row(vizList, {
+        label,
+        selected: this.state.viz === viz,
+        onPick: () => {
+          this.state.viz = viz;
+          if (viz === 'stat') this.state.series = '';
+          this.renderStep();
+        },
+      });
+    }
+    if (this.state.series && this.state.viz === 'bar') {
+      const stackRow = body.createDiv({ cls: 'icor-sqlv-wizard-toggle' });
+      const cb = stackRow.createEl('input', { type: 'checkbox' });
+      cb.checked = this.state.stack;
+      cb.setAttribute('id', 'icor-sqlv-stack');
+      const lbl = stackRow.createEl('label', { text: 'Stack the series on top of each other' });
+      lbl.setAttribute('for', 'icor-sqlv-stack');
+      cb.addEventListener('change', () => { this.state.stack = cb.checked; });
+    }
+    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Title' });
+    const title = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: this.state.title || this.suggestedTitle() });
+    title.setAttribute('aria-label', 'Widget title');
+    body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Unit (optional, shown next to values)' });
+    const unit = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: this.state.unit });
+    unit.setAttribute('placeholder', 'kg, steps, kcal …');
+    unit.setAttribute('aria-label', 'Unit');
+
+    const save = bar.createEl('button', { text: this.editIndex >= 0 ? 'Save widget' : 'Add widget', cls: 'mod-cta' });
+    save.addEventListener('click', async () => {
+      this.state.title = title.value.trim();
+      this.state.unit = unit.value.trim();
+      try {
+        await this.save();
+        this.close();
+      } catch (e) {
+        this.fail(body, e);
+      }
+    });
+  }
+
+  suggestedTitle() {
+    const what = this.state.filter ? this.state.filter.value : (this.state.agg === 'count' ? 'Rows' : this.state.metric);
+    const how = this.state.agg === 'count' ? 'count' : (AGG_LABELS[this.state.agg] || '').toLowerCase();
+    return what ? (what + (how && this.state.viz !== 'stat' ? ', ' + how : '')) : 'New widget';
+  }
+
+  async save() {
+    const source = {
+      database: this.state.database === this.spec.database ? '' : this.state.database,
+      table: this.state.table,
+      metric: this.state.metric,
+      agg: this.state.agg,
+      filter: this.state.filter && this.state.filter.value !== '' ? this.state.filter : undefined,
+      series: this.state.series || undefined,
+      timeColumn: this.state.timeColumn || undefined,
+      timeframe: this.state.timeframe,
+    };
+    const tile = {
+      title: this.state.title || this.suggestedTitle(),
+      viz: this.state.viz,
+      unit: this.state.unit,
+      stack: this.state.stack && !!this.state.series,
+      source,
+    };
+    const check = checkWidgetSource(source, tile.viz, 'This widget');
+    if (!check.ok) throw new Error(check.reason);
+    if (!source.database) delete source.database;
+    if (this.editIndex >= 0) this.spec.tiles[this.editIndex] = tile;
+    else this.spec.tiles.push(tile);
+    await this.view.saveAndRender(this.spec);
+  }
+}
+
+/* Editing a hand-written SQL tile: the SQL stays SQL, shown as such. */
+class RawTileModal extends Modal {
+  constructor(plugin, view, spec, index) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.view = view;
+    this.spec = spec;
+    this.index = index;
+  }
+  onOpen() {
+    const tile = this.spec.tiles[this.index];
+    this.titleEl.setText('Edit SQL widget');
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass('icor-sqlv-wizard');
+    contentEl.createDiv({ cls: 'icor-sqlv-note', text: 'This widget is written in SQL. It runs read-only against ' + (this.spec.database || 'its database') + '.' });
+    contentEl.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Title' });
+    const title = contentEl.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: tile.title });
+    title.setAttribute('aria-label', 'Widget title');
+    contentEl.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'SQL' });
+    const sql = contentEl.createEl('textarea', { cls: 'icor-sqlv-console' });
+    sql.value = tile.sql;
+    sql.setAttribute('rows', '6');
+    sql.setAttribute('aria-label', 'SQL query');
+    const bar = contentEl.createDiv({ cls: 'icor-sqlv-console-bar icor-sqlv-modal-bar' });
+    const save = bar.createEl('button', { text: 'Save widget', cls: 'mod-cta' });
+    const err = contentEl.createDiv({ cls: 'icor-sqlv-note' });
+    save.addEventListener('click', async () => {
+      const gate = gateStatement(sql.value);
+      if (!gate.ok) { err.setText(gate.reason); err.addClass('icor-sqlv-error'); return; }
+      tile.title = title.value.trim();
+      tile.sql = sql.value;
+      this.close();
+      await this.view.saveAndRender(this.spec);
+    });
+    const cancel = bar.createEl('button', { text: 'Cancel' });
+    cancel.addEventListener('click', () => this.close());
+  }
+  onClose() { this.contentEl.empty(); }
 }
 
 /* --------------------------------------------------- the index modal -- */
@@ -1617,6 +2528,10 @@ Each JSON file in this folder is one dashboard for the ICOR for Life - SQLite
 Viewer plugin. Open them with the "SQLite Viewer: Open dashboards" command or
 the chart icon in the ribbon.
 
+The easiest way to make a dashboard is the builder: open the dashboards
+view, press "New dashboard", and add widgets with the + tile. The builder
+writes these same files; editing them by hand stays fine.
+
 ## The file format
 
 \`\`\`json
@@ -1624,6 +2539,7 @@ the chart icon in the ribbon.
   "id": "my-dashboard",
   "title": "My Dashboard",
   "database": "07 Data/example.db",
+  "globalTimeframe": { "preset": "90d" },
   "tiles": [
     {
       "title": "Rows per day",
@@ -1632,18 +2548,43 @@ the chart icon in the ribbon.
       "x": "day",
       "y": "rows",
       "unit": "rows"
+    },
+    {
+      "title": "Daily steps",
+      "viz": "bar",
+      "unit": "steps",
+      "source": {
+        "table": "health_metric",
+        "metric": "qty",
+        "agg": "sum",
+        "filter": { "column": "metric_name", "value": "step_count" },
+        "timeColumn": "local_date",
+        "timeframe": "global"
+      }
     }
   ]
 }
 \`\`\`
 
 - \`id\`: lowercase letters, digits and hyphens. Also names the cache file.
-- \`database\`: the path of the database inside the vault.
-- \`viz\`: \`line\`, \`bar\`, \`stat\` (one big number) or \`table\`.
-- \`x\` and \`y\`: column names from the query. \`y\` may be a list of
-  columns for a multi-series chart.
+  Renaming the title is safe; the id stays.
+- \`database\`: the path of the database inside the vault. A widget's
+  \`source\` may carry its own \`database\` instead.
+- \`globalTimeframe\`: the range the header picker shows. A preset
+  (\`7d\`, \`30d\`, \`90d\`, \`12m\`, \`all\`) or \`{"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}\`.
+- A tile is either an \`sql\` tile or a built widget with a \`source\`.
+- \`viz\`: \`line\`, \`bar\`, \`stat\` (one big number) or \`table\`
+  (table only for SQL tiles).
+- SQL tiles: \`x\` and \`y\` are column names from the query; \`y\` may be
+  a list for a multi-series chart. \`stack\` stacks a bar chart.
+- Built widgets: \`table\`, \`metric\` (a number column), \`agg\` (sum,
+  avg, min, max, count, latest), optional \`filter\` (narrow the rows to
+  one value of a category column), optional \`series\` (one line or bar
+  per value of a column), optional \`groupBy\` (defaults to the time
+  column), \`timeColumn\`, and \`timeframe\` (\`"global"\` follows the
+  header picker; a preset or a from/to range is fixed). The plugin
+  generates the SQL itself.
 - \`unit\`: shown next to values, for example "kg" or "steps".
-- \`stack\`: set to \`true\` on a bar tile to stack its series.
 
 Only read queries run: one statement, starting with SELECT, WITH, PRAGMA or
 EXPLAIN. The plugin never writes to a database.
@@ -1805,6 +2746,14 @@ class IcorSqliteViewerPlugin extends Plugin {
     this.addRibbonIcon('bar-chart-3', 'Open dashboards', () => this.openDashboards());
 
     this.addCommand({ id: 'open-dashboards', name: 'Open dashboards', callback: () => this.openDashboards() });
+    this.addCommand({
+      id: 'new-dashboard',
+      name: 'Create new dashboard',
+      callback: async () => {
+        const spec = await this.createDashboard();
+        await this.openDashboards(spec.id);
+      },
+    });
     this.addCommand({ id: 'list-databases', name: 'List databases', callback: () => new DatabaseIndexModal(this).open() });
     this.addCommand({ id: 'open-browser', name: 'Open database browser', callback: () => this.openBrowserFor(null) });
 
@@ -1841,19 +2790,27 @@ class IcorSqliteViewerPlugin extends Plugin {
     this.app.workspace.revealLeaf(leaf);
   }
 
-  async openDashboards() {
+  async openDashboards(activeId) {
     const existing = this.app.workspace.getLeavesOfType(VIEW_DASHBOARDS);
     if (existing.length) {
       this.app.workspace.revealLeaf(existing[0]);
       /* A revealed view re-reads the folder. Without this, a view that
        * opened before the starter files existed stayed empty forever. */
       const view = existing[0].view;
-      if (view && typeof view.reload === 'function') await view.reload();
+      if (view && typeof view.reload === 'function') {
+        if (activeId) view.activeId = activeId;
+        await view.reload();
+      }
       return;
     }
     const leaf = this.app.workspace.getLeaf(true);
     await leaf.setViewState({ type: VIEW_DASHBOARDS, active: true });
     this.app.workspace.revealLeaf(leaf);
+    const view = leaf.view;
+    if (activeId && view && typeof view.reload === 'function') {
+      view.activeId = activeId;
+      await view.reload();
+    }
   }
 
   async loadDashboardSpecs() {
@@ -1867,7 +2824,7 @@ class IcorSqliteViewerPlugin extends Plugin {
       if (!path.toLowerCase().endsWith('.json')) continue;
       try {
         const parsed = parseDashboardSpec(await adapter.read(path));
-        if (parsed.ok) specs.push(parsed.spec);
+        if (parsed.ok) { parsed.spec.path = path; specs.push(parsed.spec); }
         else errors.push({ path, reason: parsed.reason });
       } catch (e) {
         errors.push({ path, reason: e.message });
@@ -1876,15 +2833,39 @@ class IcorSqliteViewerPlugin extends Plugin {
     return { specs, errors };
   }
 
+  /* The builder writes a dashboard back to its own file; a new dashboard
+   * gets a fresh file named after its id. */
+  async saveDashboardSpec(spec) {
+    const adapter = this.app.vault.adapter;
+    await ensureFolder(adapter, this.settings.dashboardFolder);
+    if (!spec.path) spec.path = normalizePath(this.settings.dashboardFolder + '/' + spec.id + '.json');
+    await adapter.write(spec.path, specToJson(spec));
+  }
+
+  async createDashboard() {
+    const { specs } = await this.loadDashboardSpecs();
+    const taken = new Set(specs.map((s) => s.id));
+    let n = 1;
+    while (taken.has('dashboard-' + n)) n++;
+    const spec = {
+      id: 'dashboard-' + n,
+      title: 'New dashboard',
+      database: '',
+      globalTimeframe: DEFAULT_GLOBAL_TIMEFRAME,
+      tiles: [],
+    };
+    await this.saveDashboardSpec(spec);
+    return spec;
+  }
+
   async writeDashboardCache(spec, tiles) {
     const adapter = this.app.vault.adapter;
-    const path = cachePathFor(this.settings.cacheFolder, spec.database, spec.id);
+    const path = dashCachePath(this.settings.cacheFolder, spec.id);
     const folder = path.slice(0, path.lastIndexOf('/'));
     await ensureFolder(adapter, folder);
     const payload = {
       dashboardId: spec.id,
       title: spec.title,
-      database: spec.database,
       computedAt: new Date().toISOString(),
       tiles,
     };
@@ -1893,17 +2874,20 @@ class IcorSqliteViewerPlugin extends Plugin {
 
   async readDashboardCache(spec) {
     const adapter = this.app.vault.adapter;
-    const path = cachePathFor(this.settings.cacheFolder, spec.database, spec.id);
-    if (!(await adapter.exists(path))) return null;
-    try {
-      const cache = JSON.parse(await adapter.read(path));
-      if (!cache || !Array.isArray(cache.tiles) || typeof cache.computedAt !== 'string') return null;
-      return cache;
-    } catch (e) {
-      return null;
+    const candidates = [dashCachePath(this.settings.cacheFolder, spec.id)];
+    if (spec.database) candidates.push(cachePathFor(this.settings.cacheFolder, spec.database, spec.id));
+    for (const path of candidates) {
+      if (!(await adapter.exists(path))) continue;
+      try {
+        const cache = JSON.parse(await adapter.read(path));
+        if (cache && Array.isArray(cache.tiles) && typeof cache.computedAt === 'string') return cache;
+      } catch (e) { /* an unreadable cache reads as no cache */ }
     }
+    return null;
   }
 
+  /* Starters are seeded only for databases that exist in this vault: a
+   * member without the health archive gets no broken health dashboard. */
   async ensureStarterFiles() {
     const adapter = this.app.vault.adapter;
     const folder = this.settings.dashboardFolder;
@@ -1912,8 +2896,103 @@ class IcorSqliteViewerPlugin extends Plugin {
     if (!(await adapter.exists(readmePath))) await adapter.write(readmePath, DASHBOARD_README);
     for (const starter of STARTER_DASHBOARDS) {
       const path = folder + '/' + starter.file;
-      if (!(await adapter.exists(path))) await adapter.write(path, JSON.stringify(starter.spec, null, 2) + '\n');
+      if (await adapter.exists(path)) continue;
+      if (!(await adapter.exists(starter.spec.database))) continue;
+      await adapter.write(path, JSON.stringify(starter.spec, null, 2) + '\n');
     }
+  }
+
+  /* ------------------------------------------- schema for the picker -- */
+
+  /* Tables, columns and types for one database: live when an engine can
+   * open it, from the desktop-written catalog when it cannot. */
+  async schemaFor(dbPath) {
+    const choice = await this.query.engineFor(dbPath);
+    if (choice.engine) {
+      const tables = [];
+      const res = await this.query.query(dbPath, "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name");
+      for (const [name] of res.rows) {
+        const info = await this.query.query(dbPath, 'PRAGMA table_info(' + quoteIdent(name) + ')');
+        const nameIdx = columnIndex(info.columns, 'name');
+        const typeIdx = columnIndex(info.columns, 'type');
+        tables.push({ name, columns: info.rows.map((r) => ({ name: r[nameIdx], type: r[typeIdx] })) });
+      }
+      return { live: true, tables };
+    }
+    const catalog = await this.readCatalog(dbPath);
+    if (catalog) return { live: false, tables: catalog.tables, computedAt: catalog.computedAt };
+    throw new Error((choice.reason || 'This database cannot be opened here.') + ' No catalog yet. Open the database once on the desktop and sync.');
+  }
+
+  /* The distinct values of one text column, for the tall-table picker. */
+  async distinctValues(dbPath, table, column) {
+    const choice = await this.query.engineFor(dbPath);
+    if (choice.engine) {
+      const res = await this.query.query(dbPath,
+        'SELECT DISTINCT ' + quoteIdent(column) + ' FROM ' + quoteIdent(table) +
+        ' WHERE ' + quoteIdent(column) + ' IS NOT NULL ORDER BY 1 LIMIT 201');
+      return { values: res.rows.map((r) => String(r[0])), truncated: res.rows.length > 200 };
+    }
+    const catalog = await this.readCatalog(dbPath);
+    const key = table + '.' + column;
+    if (catalog && catalog.values && catalog.values[key]) {
+      return { values: catalog.values[key], truncated: false };
+    }
+    throw new Error('The values of ' + column + ' are not in the catalog yet. Open this database once on the desktop and sync.');
+  }
+
+  async readCatalog(dbPath) {
+    const adapter = this.app.vault.adapter;
+    const path = catalogPathFor(this.settings.cacheFolder, dbPath);
+    if (!(await adapter.exists(path))) return null;
+    try {
+      const catalog = JSON.parse(await adapter.read(path));
+      if (catalog && Array.isArray(catalog.tables)) return catalog;
+    } catch (e) { /* an unreadable catalog reads as none */ }
+    return null;
+  }
+
+  /* On the desktop, after a database was successfully touched, write the
+   * catalog the mobile picker needs: tables, columns, types, and the
+   * distinct values of low-cardinality text columns. Once per session per
+   * database, in the background, never blocking a render. */
+  maybeWriteCatalog(dbPath) {
+    if (!Platform.isDesktopApp) return;
+    if (!this.catalogged) this.catalogged = new Set();
+    if (this.catalogged.has(dbPath)) return;
+    this.catalogged.add(dbPath);
+    this.writeCatalog(dbPath).catch((e) => {
+      console.error('ICOR SQLite Viewer: catalog for ' + dbPath + ' failed', e);
+      this.catalogged.delete(dbPath);
+    });
+  }
+
+  async writeCatalog(dbPath) {
+    const schema = await this.schemaFor(dbPath);
+    if (!schema.live) return;
+    const values = {};
+    for (const table of schema.tables) {
+      for (const col of table.columns) {
+        if (!isTextType(col.type)) continue;
+        try {
+          const res = await this.query.query(dbPath,
+            'SELECT DISTINCT ' + quoteIdent(col.name) + ' FROM ' + quoteIdent(table.name) +
+            ' WHERE ' + quoteIdent(col.name) + ' IS NOT NULL LIMIT 201');
+          if (res.rows.length > 0 && res.rows.length <= 200) {
+            values[table.name + '.' + col.name] = res.rows.map((r) => String(r[0])).sort();
+          }
+        } catch (e) { /* a column that will not enumerate is left out */ }
+      }
+    }
+    const adapter = this.app.vault.adapter;
+    const path = catalogPathFor(this.settings.cacheFolder, dbPath);
+    await ensureFolder(adapter, path.slice(0, path.lastIndexOf('/')));
+    await adapter.write(path, JSON.stringify({
+      database: dbPath,
+      computedAt: new Date().toISOString(),
+      tables: schema.tables,
+      values,
+    }, null, 2));
   }
 }
 
@@ -1924,10 +3003,13 @@ IcorSqliteViewerPlugin.lib = {
   cliTable, wasmTable, toCsv,
   quoteIdent, quoteLiteral, filterClause, buildBrowseQuery, buildCountQuery,
   isSidecarPath, isDbPath, isSkippedPath, findDatabases,
-  parseDashboardSpec, cachePathFor, planMigration,
+  parseDashboardSpec, cachePathFor, dashCachePath, catalogPathFor, planMigration,
   niceScale, stackRows, statOf,
+  validTimeframe, resolveTimeframe, timeframeConditions, sqlForWidget,
+  pivotSeries, prepareTileForRender, checkWidgetSource, specToJson,
+  tileDatabase, tileSql, isNumericType, isTextType, guessTimeColumn,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
-  STARTER_DASHBOARDS, DEFAULT_SETTINGS,
+  STARTER_DASHBOARDS, DEFAULT_SETTINGS, PRESET_LABELS, AGG_LABELS, DEFAULT_GLOBAL_TIMEFRAME,
 };
 
 module.exports = IcorSqliteViewerPlugin;

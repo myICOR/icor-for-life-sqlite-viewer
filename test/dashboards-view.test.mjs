@@ -32,20 +32,21 @@ async function makeView(adapter, { desktop = true } = {}) {
 
 const settle = () => new Promise((r) => setTimeout(r, 20));
 
-test('a view opened against an empty folder seeds the starters and finds them', async () => {
-  const adapter = makeFakeAdapter();
+test('a view opened against an empty folder seeds the starters for existing databases and finds them', async () => {
+  const adapter = makeFakeAdapter({}, { '07 Data/engagement.db': new Uint8Array([1]) });
   const { plugin, view } = await makeView(adapter);
-  /* No engine will answer (no databases exist), but discovery must work. */
+  /* No engine will answer, but discovery must work. */
   plugin.query.cli = { ok: false, reason: 'gate' };
   await view.onOpen();
   await settle();
-  assert.ok(view.specs.length >= 3, 'the starters must be seeded and discovered, found ' + view.specs.length);
-  assert.ok(adapter.files.has('07 Data/Dashboards/health-overview.json'));
+  assert.equal(view.specs.length, 1, 'exactly the starter whose database exists, found ' + view.specs.length);
+  assert.ok(adapter.files.has('07 Data/Dashboards/engagement-overview.json'));
+  assert.equal(adapter.files.has('07 Data/Dashboards/health-overview.json'), false, 'no health database, no health starter');
   assert.equal(view.activeId, view.specs[0].id);
 });
 
 test('a failing tile query renders its error text inside the tile, never an empty tile', async () => {
-  const adapter = makeFakeAdapter();
+  const adapter = makeFakeAdapter({}, { '07 Data/engagement.db': new Uint8Array([1]) });
   const { plugin, view } = await makeView(adapter);
   plugin.query.engineFor = async () => ({ engine: 'cli', size: 1 });
   plugin.query.query = async () => { throw new Error('no such table: nope'); };
@@ -57,13 +58,14 @@ test('a failing tile query renders its error text inside the tile, never an empt
   assert.ok(errors.length > 0, 'the errors must be visible');
   assert.match(errors.map(textOf).join(' '), /no such table: nope/);
   const status = textOf(view.contentEl);
-  assert.match(status, /queries failed/, 'the status line must say that queries failed');
+  assert.match(status, /widgets failed/, 'the status line must say that widgets failed');
 });
 
 test('a failure of the whole render chain lands in the view as text, never as a blank pane', async () => {
-  const adapter = makeFakeAdapter();
+  const adapter = makeFakeAdapter({}, { '07 Data/engagement.db': new Uint8Array([1]) });
   const { plugin, view } = await makeView(adapter);
   plugin.query.engineFor = async () => { throw new Error('the engine exploded'); };
+  plugin.readDashboardCache = async () => { throw new Error('the engine exploded'); };
   await view.onOpen();
   await settle();
   const errors = collectByClass(view.contentEl, 'icor-sqlv-error');
@@ -74,7 +76,7 @@ test('a failure of the whole render chain lands in the view as text, never as a 
 });
 
 test('reload() re-reads the folder, so a dashboard added after the first open appears', async () => {
-  const adapter = makeFakeAdapter();
+  const adapter = makeFakeAdapter({}, { '07 Data/engagement.db': new Uint8Array([1]) });
   const { plugin, view } = await makeView(adapter);
   plugin.query.cli = { ok: false, reason: 'gate' };
   await view.onOpen();

@@ -56,7 +56,7 @@ test('Engine A: the SQL is one argument after -readonly and -json, never a shell
   assert.equal(deps.calls.length, 1);
   const call = deps.calls[0];
   assert.equal(call.bin, 'sqlite3');
-  assert.deepEqual(unwrap(call.args), ['-readonly', '-json', 'file:/v/x.db?mode=ro', sql]);
+  assert.deepEqual(unwrap(call.args), ['-readonly', '-json', '-cmd', '.timeout 5000', 'file:/v/x.db?mode=ro', sql]);
   assert.equal(call.options.timeout, 1234);
   assert.equal(call.options.killSignal, 'SIGKILL');
   assert.deepEqual(unwrap(table), { columns: ['a'], rows: [[1]] });
@@ -79,6 +79,14 @@ test('Engine A: a killed query says how long it waited, in plain words', async (
 test('Engine A: sqlite3 errors surface as their own text, without a scary prefix', async () => {
   const deps = fakeCli((cb) => cb(new Error('exit 1'), '', 'Error: no such table: nope\n'));
   await assert.rejects(lib.cliQuery(deps, { absPath: '/v/x.db', sql: 'SELECT * FROM nope' }), /no such table: nope/);
+});
+
+test('Engine A: a locked database explains itself in plain words', async () => {
+  const deps = fakeCli((cb) => cb(new Error('exit 5'), '', 'Error: in prepare, database is locked (5)\n'));
+  await assert.rejects(
+    lib.cliQuery(deps, { absPath: '/v/x.db', sql: 'SELECT 1' }),
+    /Another app is writing to this database right now/
+  );
 });
 
 test('detectCli: a found binary reports its version, a missing one says so plainly', async () => {
@@ -123,10 +131,10 @@ test('the row cap lands on an uncapped SELECT and leaves a capped one alone', as
   plugin.query.cli = { ok: true, version: 'gate' };
   const res = await plugin.query.query('07 Data/x.db', 'SELECT * FROM t', { cap: 500 });
   assert.equal(res.capped, true);
-  assert.match(deps.calls[0].args[3], / LIMIT 500$/);
+  assert.match(deps.calls[0].args[5], / LIMIT 500$/);
   await plugin.query.query('07 Data/x.db', 'SELECT * FROM t LIMIT 7', { cap: 500 });
-  assert.match(deps.calls[1].args[3], /LIMIT 7$/);
-  assert.doesNotMatch(deps.calls[1].args[3], /LIMIT 500/);
+  assert.match(deps.calls[1].args[5], /LIMIT 7$/);
+  assert.doesNotMatch(deps.calls[1].args[5], /LIMIT 500/);
 });
 
 test('engine choice: no CLI and a file over the cap means no engine, in plain words', async () => {
@@ -176,18 +184,24 @@ test('Engine B end to end: real bytes through the plugin loader, on the mobile p
 
 /* ---------------------------------------------------- the dashboard cache -- */
 
-test('the cache round-trips through the adapter, under the database stem', async () => {
+test('the cache round-trips through the adapter, keyed by dashboard id, and a 0.1.x cache still reads', async () => {
   const adapter = makeFakeAdapter();
   const { plugin } = await makeServicePlugin(adapter);
   const spec = { id: 'health-overview', title: 'Health', database: '07 Data/mypka-health.db', tiles: [] };
   const tiles = [{ title: 'T', viz: 'stat', x: '', y: ['n'], unit: '', stack: false, columns: ['n'], rows: [[42]] }];
   await plugin.writeDashboardCache(spec, tiles);
-  const path = '07 Data/Dashboard Cache/mypka-health/health-overview.json';
+  const path = '07 Data/Dashboard Cache/dashboards/health-overview.json';
   assert.equal(adapter.files.has(path), true);
   const cache = await plugin.readDashboardCache(spec);
   assert.equal(cache.dashboardId, 'health-overview');
   assert.deepEqual(unwrap(cache.tiles[0].rows), [[42]]);
   assert.equal(typeof cache.computedAt, 'string');
+  /* A cache written by 0.1.x under the database stem is still found. */
+  const old = { id: 'legacy-dash', title: 'L', database: '07 Data/mypka-health.db', tiles: [] };
+  await adapter.write('07 Data/Dashboard Cache/mypka-health/legacy-dash.json',
+    JSON.stringify({ dashboardId: 'legacy-dash', computedAt: '2026-09-01T00:00:00Z', tiles: [] }));
+  const legacy = await plugin.readDashboardCache(old);
+  assert.equal(legacy.dashboardId, 'legacy-dash');
 });
 
 test('a broken cache file reads as no cache, never as a crash', async () => {
@@ -200,7 +214,14 @@ test('a broken cache file reads as no cache, never as a crash', async () => {
 /* ------------------------------------------------- the starter writer -- */
 
 test('starter files are written once and never overwritten', async () => {
-  const adapter = makeFakeAdapter({ '07 Data/Dashboards/health-overview.json': 'MEMBER EDITED' });
+  const adapter = makeFakeAdapter(
+    { '07 Data/Dashboards/health-overview.json': 'MEMBER EDITED' },
+    {
+      '07 Data/mypka-health.db': new Uint8Array([1]),
+      '07 Data/engagement.db': new Uint8Array([1]),
+      '06 AI Team/AI Team Knowledge/Data/youtube-analytics.db': new Uint8Array([1]),
+    }
+  );
   const { plugin } = await makeServicePlugin(adapter);
   await plugin.ensureStarterFiles();
   assert.equal(adapter.files.get('07 Data/Dashboards/health-overview.json'), 'MEMBER EDITED',

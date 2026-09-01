@@ -60,6 +60,23 @@ open the database shows the cached dashboard with a plain line: "Computed
 on desktop, 2 hours ago." Databases under the size cap render live
 everywhere.
 
+## The dashboard builder
+
+Since 0.2.0 dashboards are built in the UI, no SQL needed. "New dashboard"
+creates a page with an editable title (click it to rename) and a global
+time range picker; the + tile adds a widget through a short flow in plain
+words: which database, which table, what to measure (a number column, or
+a category first, such as picking step_count out of a fifteen-million-row
+metrics table), how to add it up, whether to split it into series, which
+time column and period (widgets follow the dashboard's range by default),
+and how it should look. Widgets carry edit and remove buttons; every
+change saves back to the JSON file. The builder never writes SQL by hand:
+a widget is a structured description, and deterministic code generates the
+query, through the same read-only gate as everything else. Works on
+phones and tablets too, with touch-sized targets; for a database too big
+for the device, the picker reads a catalog the desktop writes next to the
+cache.
+
 ## Dashboards
 
 Each dashboard is one JSON file: which database, which queries, which

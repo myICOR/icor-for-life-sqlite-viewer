@@ -424,6 +424,217 @@
   margin-top: var(--size-2-1);
 }
 
+/* ------------------------------------------------- dashboard builder -- */
+
+.icor-sqlv-dash-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--size-4-2);
+  margin-bottom: var(--size-2-3);
+}
+
+.icor-sqlv-dash-title { min-width: 0; }
+
+.icor-sqlv-dash-title-text {
+  margin: 0;
+  font-size: 1.4em;
+  font-weight: var(--font-bold, 700);
+  color: var(--text-normal);
+  cursor: text;
+  border-radius: var(--radius-s);
+  padding: var(--size-2-1) var(--size-2-2);
+  overflow-wrap: anywhere;
+}
+
+.icor-sqlv-dash-title-text:hover { background: var(--background-modifier-hover); }
+
+.icor-sqlv-dash-title-input {
+  font-size: 1.4em;
+  font-weight: var(--font-bold, 700);
+  width: min(24em, 90vw);
+}
+
+.icor-sqlv-range {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--size-2-3);
+}
+
+.icor-sqlv-range-label {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.icor-sqlv-range-custom {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--size-2-2);
+  margin-top: var(--size-2-2);
+}
+
+.icor-sqlv-dash-status { margin-bottom: var(--size-2-2); }
+
+.icor-sqlv-tile { position: relative; }
+
+.icor-sqlv-tile-actions {
+  position: absolute;
+  top: var(--size-2-2);
+  right: var(--size-2-2);
+  display: flex;
+  gap: var(--size-2-1);
+  opacity: 0;
+  transition: opacity 120ms ease;
+  z-index: 2;
+}
+
+.icor-sqlv-tile:hover .icor-sqlv-tile-actions,
+.icor-sqlv-tile:focus-within .icor-sqlv-tile-actions { opacity: 1; }
+
+.icor-sqlv-tile-action {
+  all: unset;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-s);
+  color: var(--text-muted);
+  cursor: pointer;
+  background: var(--background-secondary);
+}
+
+.icor-sqlv-tile-action:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+
+.icor-sqlv-tile-action:focus-visible { outline: 2px solid var(--interactive-accent); }
+
+.icor-sqlv-tile-action svg { width: 15px; height: 15px; }
+
+.icor-sqlv-add-tile {
+  order: 999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-2-2);
+  min-height: 120px;
+  border: 2px dashed var(--background-modifier-border);
+  background: transparent;
+  color: var(--text-faint);
+  cursor: pointer;
+}
+
+.icor-sqlv-add-tile:hover,
+.icor-sqlv-add-tile:focus-visible {
+  color: var(--text-muted);
+  border-color: var(--interactive-accent);
+  outline: none;
+}
+
+.icor-sqlv-add-plus svg { width: 28px; height: 28px; }
+
+.icor-sqlv-add-text { font-size: var(--font-ui-small); }
+
+/* ------------------------------------------------------ widget wizard -- */
+
+.icor-sqlv-wizard-modal { max-width: min(560px, 96vw); }
+
+.icor-sqlv-wizard { display: flex; flex-direction: column; gap: var(--size-2-3); }
+
+.icor-sqlv-wizard-crumbs {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
+.icor-sqlv-wizard-heading {
+  font-size: var(--font-ui-large, 1.1em);
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.icor-sqlv-wizard-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-3);
+  max-height: min(52vh, 480px);
+  overflow-y: auto;
+}
+
+.icor-sqlv-wizard-group {
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  margin-top: var(--size-2-3);
+}
+
+.icor-sqlv-wizard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.icor-sqlv-wizard-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+  padding: var(--size-2-3) var(--size-4-2);
+  min-height: 34px;
+  box-sizing: border-box;
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.icor-sqlv-wizard-row:hover { background: var(--background-modifier-hover); }
+
+.icor-sqlv-wizard-row:focus-visible { outline: 2px solid var(--interactive-accent); }
+
+.icor-sqlv-wizard-row.is-selected {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+  box-shadow: inset 2px 0 0 var(--interactive-accent);
+}
+
+.icor-sqlv-wizard-row-label {
+  color: var(--text-normal);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.icor-sqlv-wizard-row-detail {
+  color: var(--text-faint);
+  font-size: var(--font-ui-smaller);
+  text-align: right;
+  flex: 0 1 auto;
+}
+
+.icor-sqlv-wizard-search,
+.icor-sqlv-wizard-input { width: 100%; }
+
+.icor-sqlv-wizard-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  font-size: var(--font-ui-small);
+  color: var(--text-normal);
+}
+
+.icor-sqlv-modal-bar { margin-top: var(--size-4-2); justify-content: flex-end; }
+
+/* Touch: comfortable targets on phones and tablets. */
+@media (pointer: coarse) {
+  .icor-sqlv-wizard-row { min-height: 44px; padding: var(--size-2-3) var(--size-4-2); }
+  .icor-sqlv-tile-actions { opacity: 1; }
+  .icor-sqlv-tile-action { width: 36px; height: 36px; }
+  .icor-sqlv-add-tile { min-height: 140px; }
+  .icor-sqlv-dash-bar button,
+  .icor-sqlv-modal-bar button { min-height: 40px; }
+}
+
 /* ------------------------------------------------------ notes and errors -- */
 
 .icor-sqlv-note {

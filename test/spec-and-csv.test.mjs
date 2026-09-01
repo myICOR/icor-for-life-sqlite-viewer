@@ -50,8 +50,8 @@ test('broken JSON, a bad id, a missing database and an empty tile list are refus
   assert.match(lib.parseDashboardSpec(JSON.stringify(badId)).reason, /"id"/);
   const noDb = goodSpec(); delete noDb.database;
   assert.match(lib.parseDashboardSpec(JSON.stringify(noDb)).reason, /"database"/);
-  const noTiles = goodSpec(); noTiles.tiles = [];
-  assert.match(lib.parseDashboardSpec(JSON.stringify(noTiles)).reason, /at least one tile/);
+  const noTiles = goodSpec(); noTiles.tiles = 'nope';
+  assert.match(lib.parseDashboardSpec(JSON.stringify(noTiles)).reason, /"tiles"/);
 });
 
 test('a line or bar tile without x or y is refused; a stat without either is fine', () => {
