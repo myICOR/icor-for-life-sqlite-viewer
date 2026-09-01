@@ -127,6 +127,14 @@ test('the dashboards view renders every tile or its error, never nothing', { ski
     const view = factory({ app });
     view.app = app;
     await view.onOpen();
+    /* The alphabetically first dashboard may be an empty one the member
+     * just created; this gate measures a dashboard that has widgets. */
+    const withTiles = view.specs.find((s) => s.tiles.length > 0);
+    assert.ok(withTiles, 'at least one dashboard with widgets must exist in the vault');
+    if (view.activeId !== withTiles.id) {
+      view.activeId = withTiles.id;
+      view.render();
+    }
     /* renderDashboard runs unawaited from render(); give it one turn per
      * tile plus slack, then measure the DOM it left behind. The + tile
      * appears instantly and does not count as a rendered widget. */

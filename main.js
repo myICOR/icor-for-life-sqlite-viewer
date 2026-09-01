@@ -79,12 +79,39 @@ const VIEW_JSON = 'icor-sqlite-viewer-json';
 const JSON_RENDER_CAP = 2 * MB;
 const JSON_SLICE = 200 * 1024;
 const CLI_MAX_BUFFER = 64 * MB;
-/* The vault's chart colors, in series order. All Obsidian variables. */
-const SERIES_COLORS = [
-  'var(--color-blue)', 'var(--color-orange)', 'var(--color-green)',
-  'var(--color-purple)', 'var(--color-red)', 'var(--color-cyan)',
-  'var(--color-yellow)', 'var(--color-pink)',
+/* Chart series colors per the INKLINE spec (Iris, 2026-09-01): a single
+ * series is the ink writing (paper-dim); two or more take the four
+ * category lenses; anything past the lenses renders faint. styles.css
+ * maps each token to the theme with an Obsidian fallback. */
+const SERIES_TOKEN_SINGLE = 'var(--sqlv-series-1)';
+const SERIES_TOKEN_LENSES = [
+  'var(--sqlv-series-2)', 'var(--sqlv-series-3)',
+  'var(--sqlv-series-4)', 'var(--sqlv-series-5)',
 ];
+const SERIES_TOKEN_FAINT = 'var(--sqlv-fg-faint)';
+/* At most this many series render; past it the rest aggregate as Other. */
+const SERIES_CEILING = 5;
+
+/* The stroke and fill for series i of n. Pure, so the rule is testable:
+ * one series writes in ink, lenses carry categories, the fifth entry and
+ * the Other bucket stay faint, and no sixth hue is ever invented. */
+function seriesPaletteFor(count) {
+  if (count <= 0) return [];
+  if (count === 1) return [SERIES_TOKEN_SINGLE];
+  const out = [];
+  for (let i = 0; i < count; i++) out.push(i < SERIES_TOKEN_LENSES.length ? SERIES_TOKEN_LENSES[i] : SERIES_TOKEN_FAINT);
+  return out;
+}
+
+/* ------------------------------------------------------ the grid rules -- */
+
+/* The dashboard grid: square-ish cells, cell count derived from width. A
+ * widget occupies w x h cells; its place is {x, y, w, h} in the spec. */
+const GRID_MIN_COLS = 2;
+const GRID_MAX_COLS = 6;
+const GRID_UNIT_PX = 170;
+const GRID_GAP_PX = 12;
+const SPAN_CAP = 12;
 
 const DEFAULT_SETTINGS = {
   pageSize: 50,
@@ -370,6 +397,19 @@ function parseDashboardSpec(text) {
     if (!t || typeof t !== 'object') return { ok: false, reason: at + ' must be a JSON object.' };
     if (!VIZ_KINDS.has(t.viz)) return { ok: false, reason: at + ' needs a "viz" of line, bar, stat or table.' };
 
+    let layout;
+    if (t.layout !== undefined) {
+      const l = t.layout;
+      const wholeAtLeast = (v, min) => Number.isInteger(v) && v >= min;
+      if (!l || typeof l !== 'object'
+        || !wholeAtLeast(l.x, 0) || !wholeAtLeast(l.y, 0)
+        || !wholeAtLeast(l.w, 1) || !wholeAtLeast(l.h, 1)
+        || l.w > SPAN_CAP || l.h > SPAN_CAP) {
+        return { ok: false, reason: at + ': "layout" must be {x, y, w, h} in whole grid cells, w and h at least 1 and at most ' + SPAN_CAP + '.' };
+      }
+      layout = { x: l.x, y: l.y, w: l.w, h: l.h };
+    }
+
     if (t.source !== undefined) {
       /* A built widget. */
       if (t.viz === 'table') return { ok: false, reason: at + ': a built widget draws a line, bar or stat; use an SQL tile for a table.' };
@@ -381,6 +421,7 @@ function parseDashboardSpec(text) {
         viz: t.viz,
         unit: typeof t.unit === 'string' ? t.unit : '',
         stack: t.stack === true,
+        layout,
         source: {
           database: t.source.database ? normalizePath(t.source.database) : '',
           table: t.source.table,
@@ -415,6 +456,7 @@ function parseDashboardSpec(text) {
       y,
       unit: typeof t.unit === 'string' ? t.unit : '',
       stack: t.stack === true,
+      layout,
     });
   }
   return {
@@ -452,6 +494,7 @@ function specToJson(spec) {
     tile.viz = t.viz;
     if (t.unit) tile.unit = t.unit;
     if (t.stack) tile.stack = true;
+    if (t.layout) tile.layout = { x: t.layout.x, y: t.layout.y, w: t.layout.w, h: t.layout.h };
     if (t.source) {
       const s = {};
       if (t.source.database) s.database = t.source.database;
@@ -670,18 +713,31 @@ function pivotSeries(table) {
     const key = String(row[si]);
     totals.set(key, (totals.get(key) || 0) + (Number(row[vi]) || 0));
   }
-  const names = [...totals.keys()].sort((a, b) => (totals.get(b) || 0) - (totals.get(a) || 0)).slice(0, 8);
+  const ranked = [...totals.keys()].sort((a, b) => (totals.get(b) || 0) - (totals.get(a) || 0));
+  /* The extent is bounded by design, never by data: at six or more series
+   * the top four keep their lenses and the rest aggregate as Other. */
+  const degrade = ranked.length > SERIES_CEILING;
+  const names = degrade ? ranked.slice(0, SERIES_CEILING - 1) : ranked;
   const index = new Map(names.map((n, i) => [n, i]));
+  const otherSlot = degrade ? names.length : -1;
+  const width = names.length + (degrade ? 1 : 0);
   const xOrder = [];
   const byX = new Map();
   for (const row of table.rows) {
     const x = row[xi];
     const key = String(x);
-    if (!byX.has(key)) { byX.set(key, new Array(names.length).fill(null)); xOrder.push(x); }
-    const slot = index.get(String(row[si]));
-    if (slot !== undefined) byX.get(key)[slot] = row[vi];
+    if (!byX.has(key)) { byX.set(key, new Array(width).fill(null)); xOrder.push(x); }
+    let slot = index.get(String(row[si]));
+    if (slot === undefined) slot = otherSlot;
+    if (slot >= 0) {
+      const cells = byX.get(key);
+      const v = Number(row[vi]);
+      if (Number.isFinite(v)) cells[slot] = (cells[slot] || 0) + v;
+    }
   }
-  return { columns: ['x', ...names], rows: xOrder.map((x) => [x, ...byX.get(String(x))]) };
+  const columns = ['x', ...names];
+  if (degrade) columns.push('Other');
+  return { columns, rows: xOrder.map((x) => [x, ...byX.get(String(x))]) };
 }
 
 /* What the renderer needs for any tile: the tile's own axes for a raw SQL
@@ -737,6 +793,119 @@ function guessTimeColumn(columns) {
     if (names.includes(exact)) return exact;
   }
   return names.find((n) => /date|_at$|^at$|timestamp|day|week|month/i.test(n)) || '';
+}
+
+/* Case-insensitive word match for the picker lists: every word the member
+ * typed must appear somewhere in the label or the detail. */
+function matchesNeedle(needle, label, detail) {
+  const hay = (String(label || '') + ' ' + String(detail || '')).toLowerCase();
+  return String(needle || '').toLowerCase().split(/\s+/).filter(Boolean).every((w) => hay.includes(w));
+}
+
+/* ----------------------------------------------------- the grid engine -- */
+
+/* How many columns fit a container of this width, keeping cells roughly
+ * GRID_UNIT_PX square. Phones get 2, wide panes get up to 6. */
+function colsForWidth(width) {
+  const w = Number(width) || 0;
+  const cols = Math.floor((w + GRID_GAP_PX) / (GRID_UNIT_PX + GRID_GAP_PX));
+  return Math.max(GRID_MIN_COLS, Math.min(GRID_MAX_COLS, cols));
+}
+
+/* The span a widget gets when its spec carries none (a 0.2.x file):
+ * a stat is a small square, a chart a 2x2 block, a table a wide 3x2. */
+function defaultSpanFor(tile) {
+  if (tile.viz === 'stat') return { w: 1, h: 1 };
+  if (tile.viz === 'table') return { w: 3, h: 2 };
+  return { w: 2, h: 2 };
+}
+
+function clampLayout(l, cols) {
+  const w = Math.max(1, Math.min(Math.floor(l.w) || 1, Math.min(cols, SPAN_CAP)));
+  const h = Math.max(1, Math.min(Math.floor(l.h) || 1, SPAN_CAP));
+  const x = Math.max(0, Math.min(Math.floor(l.x) || 0, cols - w));
+  const y = Math.max(0, Math.floor(l.y) || 0);
+  return { x, y, w, h };
+}
+
+function rectsCollide(a, b) {
+  return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
+}
+
+/* First free spot for a w x h rectangle, scanning rows top to bottom. */
+function findSpot(placed, size, cols) {
+  const w = Math.min(size.w, cols);
+  for (let y = 0; ; y++) {
+    for (let x = 0; x + w <= cols; x++) {
+      const candidate = { x, y, w, h: size.h };
+      if (!placed.some((p) => rectsCollide(candidate, p))) return candidate;
+    }
+  }
+}
+
+/* THE PACKING RULE, in plain words: the widget being placed stays exactly
+ * where it was put; every other widget that overlaps it is pushed DOWN
+ * until nothing overlaps; then everything floats UP into the gaps, in
+ * reading order. Deterministic: the same input always packs the same. */
+function packLayout(layouts, cols, anchorIndex) {
+  const clamped = layouts.map((l) => clampLayout(l, cols));
+  const order = clamped.map((l, i) => i).sort((a, b) =>
+    (clamped[a].y - clamped[b].y) || (clamped[a].x - clamped[b].x) || (a - b));
+  const out = new Array(clamped.length);
+  const placed = [];
+  /* The anchor claims its ground first. */
+  if (anchorIndex >= 0 && anchorIndex < clamped.length) {
+    out[anchorIndex] = Object.assign({}, clamped[anchorIndex]);
+    placed.push(out[anchorIndex]);
+  }
+  /* Everyone else lands in reading order, pushed down past any overlap. */
+  for (const i of order) {
+    if (i === anchorIndex) continue;
+    const l = Object.assign({}, clamped[i]);
+    while (placed.some((p) => rectsCollide(l, p))) l.y++;
+    out[i] = l;
+    placed.push(l);
+  }
+  /* Float up: in reading order, every widget except the anchor rises while
+   * the space above it is free. */
+  const upOrder = out.map((l, i) => i).sort((a, b) =>
+    (out[a].y - out[b].y) || (out[a].x - out[b].x) || (a - b));
+  for (const i of upOrder) {
+    if (i === anchorIndex) continue;
+    const l = out[i];
+    while (l.y > 0) {
+      const above = { x: l.x, y: l.y - 1, w: l.w, h: l.h };
+      if (out.some((other, j) => j !== i && rectsCollide(above, other))) break;
+      l.y--;
+    }
+  }
+  return out;
+}
+
+/* Layouts for every tile: the spec's own {x,y,w,h} where present, a
+ * sensible default spot where not (the 0.2.x migration), everything
+ * clamped to the column count and packed without overlaps. */
+function normalizeLayout(tiles, cols) {
+  const layouts = [];
+  const placed = [];
+  for (const tile of tiles) {
+    if (tile.layout) {
+      const l = clampLayout(tile.layout, cols);
+      layouts.push(l);
+      placed.push(l);
+    } else {
+      const spot = findSpot(placed, defaultSpanFor(tile), cols);
+      layouts.push(spot);
+      placed.push(spot);
+    }
+  }
+  return packLayout(layouts, cols, -1);
+}
+
+/* The + tile shows only on an empty dashboard or in edit mode: a full
+ * dashboard at rest is widgets and nothing else. */
+function showAddTile(tileCount, editMode) {
+  return tileCount === 0 || editMode === true;
 }
 
 /* ========================================================================
@@ -1005,6 +1174,11 @@ function drawAxes(svg, scale, xLabels) {
     label.textContent = formatNumber(tick);
     svg.appendChild(label);
   }
+  /* The baseline is the axis; it separates, it does not frame. */
+  svg.appendChild(svgEl('line', {
+    x1: PAD.left, y1: PAD.top + plotH, x2: PAD.left + plotW, y2: PAD.top + plotH,
+    class: 'icor-sqlv-baseline',
+  }));
   const n = xLabels.length;
   if (n > 0) {
     const every = Math.max(1, Math.ceil(n / 7));
@@ -1023,15 +1197,28 @@ function shortXLabel(v) {
   return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s.slice(5) : (s.length > 10 ? s.slice(0, 10) : s);
 }
 
-function legendFor(parentEl, names) {
+function legendFor(parentEl, names, palette) {
   if (names.length < 2) return;
   const legend = parentEl.createDiv({ cls: 'icor-sqlv-legend' });
   names.forEach((name, i) => {
     const item = legend.createSpan({ cls: 'icor-sqlv-legend-item' });
     const chip = item.createSpan({ cls: 'icor-sqlv-legend-chip' });
-    chip.style.background = SERIES_COLORS[i % SERIES_COLORS.length];
+    chip.style.background = palette[i];
     item.createSpan({ text: name });
   });
+}
+
+/* A bar with only its top corners rounded; square when narrow. */
+function barPath(x, y, w, h, r) {
+  if (r <= 0 || h < r) {
+    return 'M ' + x.toFixed(1) + ' ' + (y + h).toFixed(1) + ' V ' + y.toFixed(1) + ' H ' + (x + w).toFixed(1) + ' V ' + (y + h).toFixed(1) + ' Z';
+  }
+  return 'M ' + x.toFixed(1) + ' ' + (y + h).toFixed(1) +
+    ' V ' + (y + r).toFixed(1) +
+    ' Q ' + x.toFixed(1) + ' ' + y.toFixed(1) + ' ' + (x + r).toFixed(1) + ' ' + y.toFixed(1) +
+    ' H ' + (x + w - r).toFixed(1) +
+    ' Q ' + (x + w).toFixed(1) + ' ' + y.toFixed(1) + ' ' + (x + w).toFixed(1) + ' ' + (y + r).toFixed(1) +
+    ' V ' + (y + h).toFixed(1) + ' Z';
 }
 
 function renderLineChart(parentEl, table, tile) {
@@ -1054,6 +1241,7 @@ function renderLineChart(parentEl, table, tile) {
   const xOf = (i) => PAD.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
   const yOf = (v) => PAD.top + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
 
+  const palette = seriesPaletteFor(seriesIdx.length);
   seriesIdx.forEach((colIdx, s) => {
     let d = '';
     table.rows.forEach((row, i) => {
@@ -1062,21 +1250,24 @@ function renderLineChart(parentEl, table, tile) {
       d += (d ? ' L ' : 'M ') + xOf(i).toFixed(1) + ' ' + yOf(v).toFixed(1);
     });
     if (!d) return;
-    const path = svgEl('path', { d, fill: 'none', 'stroke-width': 1.8, 'stroke-linejoin': 'round' });
-    path.setAttribute('stroke', SERIES_COLORS[s % SERIES_COLORS.length]);
+    /* Ruled, not drawn: this surface measures. */
+    const path = svgEl('path', { d, fill: 'none', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+    path.setAttribute('stroke', palette[s]);
     svg.appendChild(path);
   });
 
-  /* Hover: a guide line plus the values of the nearest x, in one readout. */
+  /* Hover: the pen points. A solid marker guide, marker dots on the
+   * hovered points, and the values on a small chip. */
   const guide = svgEl('line', { y1: PAD.top, y2: PAD.top + plotH, class: 'icor-sqlv-guide', visibility: 'hidden' });
-  const readout = svgEl('text', { y: PAD.top + 2, class: 'icor-sqlv-readout', visibility: 'hidden' });
-  const dots = seriesIdx.map((colIdx, s) => {
-    const dot = svgEl('circle', { r: 3, visibility: 'hidden' });
-    dot.setAttribute('fill', SERIES_COLORS[s % SERIES_COLORS.length]);
+  const chip = svgEl('rect', { class: 'icor-sqlv-readout-chip', rx: 4, height: 18, visibility: 'hidden' });
+  const readout = svgEl('text', { class: 'icor-sqlv-readout', visibility: 'hidden' });
+  const dots = seriesIdx.map(() => {
+    const dot = svgEl('circle', { r: 3, class: 'icor-sqlv-hover-dot', visibility: 'hidden' });
     svg.appendChild(dot);
     return dot;
   });
   svg.appendChild(guide);
+  svg.appendChild(chip);
   svg.appendChild(readout);
   const hover = svgEl('rect', { x: PAD.left, y: PAD.top, width: plotW, height: plotH, fill: 'transparent' });
   svg.appendChild(hover);
@@ -1097,16 +1288,25 @@ function renderLineChart(parentEl, table, tile) {
       }
     });
     readout.textContent = parts.join('  ·  ');
-    readout.setAttribute('x', x > CHART_W / 2 ? x - 6 : x + 6);
-    readout.setAttribute('text-anchor', x > CHART_W / 2 ? 'end' : 'start');
+    const flip = x > CHART_W / 2;
+    readout.setAttribute('x', flip ? x - 10 : x + 10);
+    readout.setAttribute('y', PAD.top + 12);
+    readout.setAttribute('text-anchor', flip ? 'end' : 'start');
     readout.setAttribute('visibility', 'visible');
+    const textW = typeof readout.getComputedTextLength === 'function'
+      ? readout.getComputedTextLength() : readout.textContent.length * 6;
+    chip.setAttribute('width', Math.ceil(textW) + 12);
+    chip.setAttribute('x', flip ? x - 16 - textW : x + 4);
+    chip.setAttribute('y', PAD.top);
+    chip.setAttribute('visibility', 'visible');
   });
   hover.addEventListener('mouseleave', () => {
     guide.setAttribute('visibility', 'hidden');
+    chip.setAttribute('visibility', 'hidden');
     readout.setAttribute('visibility', 'hidden');
     for (const dot of dots) dot.setAttribute('visibility', 'hidden');
   });
-  legendFor(parentEl, seriesNames);
+  legendFor(parentEl, seriesNames, palette);
 }
 
 function renderBarChart(parentEl, table, tile) {
@@ -1135,14 +1335,24 @@ function renderBarChart(parentEl, table, tile) {
   const titleOf = (rowI, s, v) =>
     String(xLabels[rowI]) + ' · ' + seriesNames[s] + ' ' + formatNumber(v) + (tile.unit ? ' ' + tile.unit : '');
 
+  const palette = seriesPaletteFor(seriesIdx.length);
   if (stacked) {
     const stacks = stackRows(table.rows, seriesIdx);
     stacks.forEach((segs, rowI) => {
       const x = PAD.left + rowI * slot + gap / 2;
+      const w = Math.max(1, slot - gap);
       segs.forEach(([lo, hi], s) => {
         if (hi <= lo) return;
-        const bar = svgEl('rect', { x: x.toFixed(1), y: yOf(hi).toFixed(1), width: Math.max(1, slot - gap).toFixed(1), height: Math.max(0.5, yOf(lo) - yOf(hi)).toFixed(1) });
-        bar.setAttribute('fill', SERIES_COLORS[s % SERIES_COLORS.length]);
+        /* Segments separated by 1px of tile ground, not by stroke. */
+        const yTop = yOf(hi);
+        const pixelH = Math.max(0.5, yOf(lo) - yTop - (s < segs.length - 1 ? 0 : 0));
+        const isTopmost = segs.slice(s + 1).every(([l2, h2]) => h2 <= l2);
+        const inset = isTopmost ? 0 : 1;
+        const bar = svgEl('rect', {
+          x: x.toFixed(1), y: (yTop + inset).toFixed(1),
+          width: w.toFixed(1), height: Math.max(0.5, pixelH - inset).toFixed(1),
+        });
+        bar.setAttribute('fill', palette[s]);
         const t = svgEl('title', {});
         t.textContent = titleOf(rowI, s, hi - lo);
         bar.appendChild(t);
@@ -1151,13 +1361,16 @@ function renderBarChart(parentEl, table, tile) {
     });
   } else {
     const inner = Math.max(1, (slot - gap) / seriesIdx.length);
+    /* Flat tops when narrow, a 4px round at wide bars. */
+    const r = inner >= 8 ? Math.min(4, inner / 2) : 0;
     table.rows.forEach((row, rowI) => {
       seriesIdx.forEach((colIdx, s) => {
         const v = Number(row[colIdx]) || 0;
         if (v <= 0) return;
         const x = PAD.left + rowI * slot + gap / 2 + s * inner;
-        const bar = svgEl('rect', { x: x.toFixed(1), y: yOf(v).toFixed(1), width: inner.toFixed(1), height: Math.max(0.5, yOf(0) - yOf(v)).toFixed(1) });
-        bar.setAttribute('fill', SERIES_COLORS[s % SERIES_COLORS.length]);
+        const h = Math.max(0.5, yOf(0) - yOf(v));
+        const bar = svgEl('path', { d: barPath(x, yOf(v), inner, h, r) });
+        bar.setAttribute('fill', palette[s]);
         const t = svgEl('title', {});
         t.textContent = titleOf(rowI, s, v);
         bar.appendChild(t);
@@ -1165,7 +1378,7 @@ function renderBarChart(parentEl, table, tile) {
       });
     });
   }
-  legendFor(parentEl, seriesNames);
+  legendFor(parentEl, seriesNames, palette);
 }
 
 function renderStatTile(parentEl, table, tile) {
@@ -1601,6 +1814,10 @@ class SqliteDashboardsView extends ItemView {
     this.specs = [];
     this.errors = [];
     this.activeId = null;
+    this.editMode = false;
+    this.gridState = null;
+    this.gridRO = null;
+    this.dragging = false;
   }
 
   getViewType() { return VIEW_DASHBOARDS; }
@@ -1707,12 +1924,82 @@ class SqliteDashboardsView extends ItemView {
     this.renderHeader(host, spec);
     const status = host.createDiv({ cls: 'icor-sqlv-note icor-sqlv-dash-status' });
     const grid = host.createDiv({ cls: 'icor-sqlv-grid' });
-    this.appendAddTile(grid, spec);
+    this.gridState = { spec, grid, cols: 0, cellH: 0, tileEls: [], layouts: [], addEl: null };
+    this.setupGridGeometry();
+    this.watchGridWidth();
     try {
       await this.renderDashboardInto(spec, status, grid);
     } catch (e) {
       this.showFailure(e, host);
     }
+    this.placeAddTile();
+  }
+
+  /* Square-ish cells: the column count follows the pane width, the row
+   * height follows the resulting cell width. */
+  setupGridGeometry() {
+    const gs = this.gridState;
+    if (!gs) return;
+    const width = gs.grid.clientWidth || 1080;
+    gs.cols = colsForWidth(width);
+    gs.cellH = Math.max(90, Math.floor((width - (gs.cols - 1) * GRID_GAP_PX) / gs.cols));
+    gs.grid.style.gridTemplateColumns = 'repeat(' + gs.cols + ', minmax(0, 1fr))';
+    gs.grid.style.gridAutoRows = gs.cellH + 'px';
+  }
+
+  watchGridWidth() {
+    if (this.gridRO) { this.gridRO.disconnect(); this.gridRO = null; }
+    if (typeof ResizeObserver === 'undefined' || !this.gridState) return;
+    this.gridRO = new ResizeObserver(() => {
+      const gs = this.gridState;
+      if (!gs || this.dragging) return;
+      const cols = colsForWidth(gs.grid.clientWidth || 1080);
+      if (cols === gs.cols) return;
+      this.setupGridGeometry();
+      gs.layouts = normalizeLayout(gs.spec.tiles, gs.cols);
+      this.applyGridDisplay();
+      this.placeAddTile();
+    });
+    this.gridRO.observe(this.gridState.grid);
+  }
+
+  async onClose() {
+    if (this.gridRO) { this.gridRO.disconnect(); this.gridRO = null; }
+  }
+
+  applyGridDisplay(preview) {
+    const gs = this.gridState;
+    if (!gs) return;
+    const layouts = preview || gs.layouts;
+    gs.tileEls.forEach((el, i) => {
+      const l = layouts[i];
+      if (!el || !l) return;
+      el.style.gridColumn = (l.x + 1) + ' / span ' + l.w;
+      el.style.gridRow = (l.y + 1) + ' / span ' + l.h;
+    });
+  }
+
+  /* The + tile: only on an empty dashboard or in edit mode, in the first
+   * free 2x1 slot. */
+  placeAddTile() {
+    const gs = this.gridState;
+    if (!gs) return;
+    if (gs.addEl) { if (gs.addEl.parentElement) gs.addEl.parentElement.removeChild(gs.addEl); gs.addEl = null; }
+    if (!showAddTile(gs.spec.tiles.length, this.editMode)) return;
+    const spot = findSpot(gs.layouts, { w: 2, h: 1 }, gs.cols);
+    const add = gs.grid.createDiv({ cls: 'icor-sqlv-tile icor-sqlv-add-tile' });
+    add.setAttribute('role', 'button');
+    add.setAttribute('tabindex', '0');
+    add.setAttribute('aria-label', 'Add a widget');
+    add.style.gridColumn = (spot.x + 1) + ' / span ' + spot.w;
+    add.style.gridRow = (spot.y + 1) + ' / span ' + spot.h;
+    const plus = add.createDiv({ cls: 'icor-sqlv-add-plus' });
+    setIcon(plus, 'plus');
+    add.createDiv({ cls: 'icor-sqlv-add-text', text: 'Add widget' });
+    const start = () => new WidgetWizard(this.plugin, this, gs.spec, -1).open();
+    add.addEventListener('click', start);
+    add.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); start(); } });
+    gs.addEl = add;
   }
 
   /* The dashboard header: the title, editable in place, and the global
@@ -1785,20 +2072,123 @@ class SqliteDashboardsView extends ItemView {
       spec.globalTimeframe = { preset: select.value };
       await this.saveAndRender(spec);
     });
+
+    const editBtn = header.createEl('button', { cls: 'icor-sqlv-edit-toggle' + (this.editMode ? ' is-on' : '') });
+    setIcon(editBtn, this.editMode ? 'check' : 'pencil');
+    editBtn.createSpan({ text: this.editMode ? 'Done' : 'Edit' });
+    editBtn.setAttribute('aria-pressed', this.editMode ? 'true' : 'false');
+    editBtn.setAttribute('aria-label', this.editMode ? 'Leave edit mode' : 'Edit this dashboard: move, resize, add and remove widgets');
+    editBtn.addEventListener('click', () => {
+      this.editMode = !this.editMode;
+      this.render();
+    });
   }
 
-  /* The + tile that starts the widget wizard. CSS keeps it last. */
-  appendAddTile(grid, spec) {
-    const add = grid.createDiv({ cls: 'icor-sqlv-tile icor-sqlv-add-tile' });
-    add.setAttribute('role', 'button');
-    add.setAttribute('tabindex', '0');
-    add.setAttribute('aria-label', 'Add a widget');
-    const plus = add.createDiv({ cls: 'icor-sqlv-add-plus' });
-    setIcon(plus, 'plus');
-    add.createDiv({ cls: 'icor-sqlv-add-text', text: 'Add widget' });
-    const start = () => new WidgetWizard(this.plugin, this, spec, -1).open();
-    add.addEventListener('click', start);
-    add.addEventListener('keydown', (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); start(); } });
+  /* Move by dragging the tile, resize by dragging the corner handle.
+   * Pointer events, so mouse and touch behave the same; the CSS sets
+   * touch-action: none on these surfaces so the pane does not scroll
+   * while a widget is in hand. */
+  attachEditHandles(tileEl, index) {
+    const surface = tileEl.createDiv({ cls: 'icor-sqlv-drag-surface' });
+    surface.setAttribute('aria-label', 'Drag to move this widget');
+    surface.setAttribute('title', 'Drag to move');
+    surface.addEventListener('pointerdown', (ev) => this.startDrag(ev, index, 'move', surface));
+    const handle = tileEl.createDiv({ cls: 'icor-sqlv-resize-handle' });
+    handle.setAttribute('aria-label', 'Drag to resize this widget');
+    handle.setAttribute('title', 'Drag to resize');
+    handle.addEventListener('pointerdown', (ev) => this.startDrag(ev, index, 'resize', handle));
+  }
+
+  startDrag(ev, index, mode, surface) {
+    const gs = this.gridState;
+    if (!this.editMode || !gs || this.dragging) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    this.dragging = true;
+    if (typeof surface.setPointerCapture === 'function') {
+      try { surface.setPointerCapture(ev.pointerId); } catch (e) { /* capture is best effort */ }
+    }
+    const startX = ev.clientX;
+    const startY = ev.clientY;
+    const base = gs.layouts.map((l) => Object.assign({}, l));
+    const origin = Object.assign({}, base[index]);
+    const width = gs.grid.clientWidth || gs.cols * GRID_UNIT_PX;
+    const cellW = width / gs.cols;
+    const cellH = gs.cellH + GRID_GAP_PX;
+    const tileEl = gs.tileEls[index];
+    tileEl.classList.add('is-dragging');
+    let placeholder = null;
+    let hole = null;
+    if (mode === 'move') {
+      /* Two dashed states while a widget is in hand: the hole it left
+       * behind (hairline) and the cell it would land in (marker). */
+      hole = gs.grid.createDiv({ cls: 'icor-sqlv-drag-hole' });
+      hole.style.gridColumn = (origin.x + 1) + ' / span ' + origin.w;
+      hole.style.gridRow = (origin.y + 1) + ' / span ' + origin.h;
+      placeholder = gs.grid.createDiv({ cls: 'icor-sqlv-drop-cell' });
+    }
+    let preview = base;
+
+    const onMove = (mv) => {
+      const dx = mv.clientX - startX;
+      const dy = mv.clientY - startY;
+      const dCol = Math.round(dx / cellW);
+      const dRow = Math.round(dy / cellH);
+      const candidate = Object.assign({}, origin);
+      if (mode === 'move') {
+        candidate.x = origin.x + dCol;
+        candidate.y = Math.max(0, origin.y + dRow);
+      } else {
+        candidate.w = Math.max(1, origin.w + dCol);
+        candidate.h = Math.max(1, origin.h + dRow);
+      }
+      const next = base.map((l, j) => (j === index ? candidate : Object.assign({}, l)));
+      preview = packLayout(next, gs.cols, index);
+      this.applyGridDisplay(preview);
+      if (mode === 'move') {
+        /* The tile itself follows the pointer from its old cell; the
+         * placeholder shows the exact cell it would land in. */
+        const p = preview[index];
+        placeholder.style.gridColumn = (p.x + 1) + ' / span ' + p.w;
+        placeholder.style.gridRow = (p.y + 1) + ' / span ' + p.h;
+        tileEl.style.gridColumn = (origin.x + 1) + ' / span ' + origin.w;
+        tileEl.style.gridRow = (origin.y + 1) + ' / span ' + origin.h;
+        tileEl.style.transform = 'translate(' + dx + 'px, ' + dy + 'px)';
+      }
+    };
+
+    const cleanup = () => {
+      surface.removeEventListener('pointermove', onMove);
+      surface.removeEventListener('pointerup', commit);
+      surface.removeEventListener('pointercancel', cancel);
+      tileEl.classList.remove('is-dragging');
+      tileEl.style.transform = '';
+      if (placeholder && placeholder.parentElement) placeholder.parentElement.removeChild(placeholder);
+      if (hole && hole.parentElement) hole.parentElement.removeChild(hole);
+      this.dragging = false;
+    };
+
+    const commit = async () => {
+      cleanup();
+      gs.layouts = preview;
+      this.applyGridDisplay();
+      this.placeAddTile();
+      gs.spec.tiles.forEach((t, j) => { t.layout = Object.assign({}, gs.layouts[j]); });
+      try {
+        await this.plugin.saveDashboardSpec(gs.spec);
+      } catch (e) {
+        new Notice('The layout could not be saved: ' + e.message);
+      }
+    };
+
+    const cancel = () => {
+      cleanup();
+      this.applyGridDisplay();
+    };
+
+    surface.addEventListener('pointermove', onMove);
+    surface.addEventListener('pointerup', commit);
+    surface.addEventListener('pointercancel', cancel);
   }
 
   /* Edit and remove, in the corner of every widget. */
@@ -1841,12 +2231,21 @@ class SqliteDashboardsView extends ItemView {
     let failed = 0;
     let fromCache = 0;
     const t0 = Date.now();
+    const gs = this.gridState;
+    gs.layouts = normalizeLayout(spec.tiles, gs.cols);
 
     for (let i = 0; i < spec.tiles.length; i++) {
       const tile = spec.tiles[i];
       status.setText('Running query ' + (i + 1) + ' of ' + spec.tiles.length + (tile.title ? ': ' + tile.title : '') + ' …');
-      const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
-      this.addTileActions(tileEl, spec, i);
+      const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') + (this.editMode ? ' is-editing' : '') });
+      gs.tileEls[i] = tileEl;
+      const l = gs.layouts[i];
+      tileEl.style.gridColumn = (l.x + 1) + ' / span ' + l.w;
+      tileEl.style.gridRow = (l.y + 1) + ' / span ' + l.h;
+      if (this.editMode) {
+        this.addTileActions(tileEl, spec, i);
+        this.attachEditHandles(tileEl, i);
+      }
       const db = tileDatabase(tile, spec);
       if (!db) {
         failed++;
@@ -1976,6 +2375,55 @@ class WidgetWizard extends Modal {
 
   tableInfo() { return this.schema ? this.schema.tables.find((t) => t.name === this.state.table) : null; }
 
+  /* THE ONE LIST every wizard step uses: an optional search field on top
+   * (type to narrow, any word, anywhere in the name, case does not
+   * matter), grouped rows, and a keyboard: arrows move, Enter picks. */
+  list(body, { items, search = true, autofocus = true, placeholder = 'Type to narrow the list' }) {
+    let input = null;
+    if (search && items.length > 4) {
+      input = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-search' });
+      input.setAttribute('placeholder', placeholder);
+      input.setAttribute('aria-label', placeholder);
+    }
+    const host = body.createDiv({ cls: 'icor-sqlv-wizard-listhost' });
+    let active = -1;
+    let visible = [];
+    const draw = () => {
+      host.empty();
+      const needle = input ? input.value.trim() : '';
+      visible = items.filter((item) => matchesNeedle(needle, item.label, item.detail));
+      if (active >= visible.length) active = visible.length - 1;
+      let lastGroup;
+      let listEl = null;
+      visible.forEach((item, i) => {
+        if (item.group !== lastGroup || !listEl) {
+          if (item.group && item.group !== lastGroup) host.createDiv({ cls: 'icor-sqlv-wizard-group', text: item.group });
+          if (item.group !== lastGroup || !listEl) listEl = host.createDiv({ cls: 'icor-sqlv-wizard-list' });
+          lastGroup = item.group;
+        }
+        const rowEl = this.row(listEl, item);
+        if (i === active) rowEl.addClass('is-keyboard');
+        item.el = rowEl;
+      });
+      if (!visible.length) host.createDiv({ cls: 'icor-sqlv-empty', text: 'Nothing matches.' });
+    };
+    if (input) {
+      input.addEventListener('input', () => { active = -1; draw(); });
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'ArrowDown') { ev.preventDefault(); active = Math.min(visible.length - 1, active + 1); draw(); }
+        else if (ev.key === 'ArrowUp') { ev.preventDefault(); active = Math.max(0, active - 1); draw(); }
+        else if (ev.key === 'Enter') {
+          ev.preventDefault();
+          const pick = visible[Math.max(0, active)] || visible[0];
+          if (pick) pick.onPick();
+        }
+      });
+    }
+    draw();
+    if (input && autofocus && typeof input.focus === 'function') input.focus();
+    return { input };
+  }
+
   /* One tappable row in a wizard list. */
   row(listEl, { label, detail, onPick, selected }) {
     const row = listEl.createDiv({ cls: 'icor-sqlv-wizard-row' + (selected ? ' is-selected' : '') });
@@ -2035,21 +2483,21 @@ class WidgetWizard extends Modal {
     const { body } = this.frame({ heading: 'Which database?' });
     const dbs = this.plugin.vaultDatabases();
     if (!dbs.length) { body.createDiv({ cls: 'icor-sqlv-note', text: 'No databases found in this vault.' }); return; }
-    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    for (const db of dbs) {
-      this.row(list, {
+    this.list(body, {
+      placeholder: 'Type to find a database',
+      items: dbs.map((db) => ({
         label: baseName(db.path),
         detail: db.path + '  ·  ' + formatBytes(db.size),
         selected: db.path === this.state.database,
-        onPick: async () => {
+        onPick: () => {
           this.state.database = db.path;
           this.state.table = '';
           this.schema = null;
           this.step = 'table';
           this.renderStep();
         },
-      });
-    }
+      })),
+    });
   }
 
   async stepTable() {
@@ -2063,9 +2511,9 @@ class WidgetWizard extends Modal {
     if (!this.schema.live) {
       body.createDiv({ cls: 'icor-sqlv-note', text: 'This database cannot be opened on this device; the picker uses the catalog the desktop wrote ' + (this.schema.computedAt ? relativeTime(this.schema.computedAt) : '') + '. The widget will show data after the next desktop pass.' });
     }
-    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    for (const t of this.schema.tables) {
-      this.row(list, {
+    this.list(body, {
+      placeholder: 'Type to find a table',
+      items: this.schema.tables.map((t) => ({
         label: t.name,
         detail: t.columns.length + ' columns',
         selected: t.name === this.state.table,
@@ -2077,8 +2525,8 @@ class WidgetWizard extends Modal {
           this.step = 'measure';
           this.renderStep();
         },
-      });
-    }
+      })),
+    });
   }
 
   stepMeasure() {
@@ -2091,36 +2539,30 @@ class WidgetWizard extends Modal {
     if (!table) { this.step = 'table'; this.renderStep(); return; }
     const numbers = table.columns.filter((c) => isNumericType(c.type));
     const texts = table.columns.filter((c) => isTextType(c.type));
-    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    this.row(list, {
+    const items = [{
       label: 'Count rows',
       detail: 'How many rows match',
       onPick: () => { this.state.metric = ''; this.state.agg = 'count'; this.state.filter = null; this.step = 'series'; this.renderStep(); },
-    });
-    if (numbers.length) {
-      body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Numbers' });
-      const numList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-      for (const c of numbers) {
-        this.row(numList, {
-          label: c.name,
-          detail: c.type,
-          selected: !this.state.filter && this.state.metric === c.name,
-          onPick: () => { this.state.metric = c.name; this.state.filter = null; if (this.state.agg === 'count') this.state.agg = 'sum'; this.step = 'agg'; this.renderStep(); },
-        });
-      }
+    }];
+    for (const c of numbers) {
+      items.push({
+        group: 'Numbers',
+        label: c.name,
+        detail: c.type,
+        selected: !this.state.filter && this.state.metric === c.name,
+        onPick: () => { this.state.metric = c.name; this.state.filter = null; if (this.state.agg === 'count') this.state.agg = 'sum'; this.step = 'agg'; this.renderStep(); },
+      });
     }
-    if (texts.length) {
-      body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Categories (narrow down first)' });
-      const catList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-      for (const c of texts) {
-        this.row(catList, {
-          label: c.name,
-          detail: 'pick one of its values',
-          selected: !!this.state.filter && this.state.filter.column === c.name,
-          onPick: () => { this.state.filter = { column: c.name, value: '' }; this.step = 'value'; this.renderStep(); },
-        });
-      }
+    for (const c of texts) {
+      items.push({
+        group: 'Categories (narrow down first)',
+        label: c.name,
+        detail: 'pick one of its values',
+        selected: !!this.state.filter && this.state.filter.column === c.name,
+        onPick: () => { this.state.filter = { column: c.name, value: '' }; this.step = 'value'; this.renderStep(); },
+      });
     }
+    this.list(body, { placeholder: 'Type to find a column', items });
   }
 
   async stepValue() {
@@ -2133,47 +2575,37 @@ class WidgetWizard extends Modal {
     if (this.step !== 'value') return;
     body.empty();
     if (values.truncated) body.createDiv({ cls: 'icor-sqlv-note', text: 'Showing the first 200 values.' });
-    const search = body.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-search' });
-    search.setAttribute('placeholder', 'Type to narrow the list');
-    search.setAttribute('aria-label', 'Filter values');
-    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    const draw = () => {
-      list.empty();
-      const needle = search.value.trim().toLowerCase();
-      for (const v of values.values) {
-        if (needle && !v.toLowerCase().includes(needle)) continue;
-        this.row(list, {
-          label: v,
-          selected: this.state.filter.value === v,
-          onPick: () => {
-            this.state.filter.value = v;
-            const table = this.tableInfo();
-            const numbers = table.columns.filter((c) => isNumericType(c.type));
-            const preferred = numbers.find((c) => /^(qty|value|amount|n)$/i.test(c.name)) || (numbers.length === 1 ? numbers[0] : null);
-            if (preferred) { this.state.metric = preferred.name; this.step = 'agg'; }
-            else if (!numbers.length) { this.state.metric = ''; this.state.agg = 'count'; this.step = 'series'; }
-            else this.step = 'metric-for-filter';
-            this.renderStep();
-          },
-        });
-      }
-    };
-    search.addEventListener('input', draw);
-    draw();
+    this.list(body, {
+      placeholder: 'Type to find a value',
+      items: values.values.map((v) => ({
+        label: v,
+        selected: this.state.filter.value === v,
+        onPick: () => {
+          this.state.filter.value = v;
+          const table = this.tableInfo();
+          const numbers = table.columns.filter((c) => isNumericType(c.type));
+          const preferred = numbers.find((c) => /^(qty|value|amount|n)$/i.test(c.name)) || (numbers.length === 1 ? numbers[0] : null);
+          if (preferred) { this.state.metric = preferred.name; this.step = 'agg'; }
+          else if (!numbers.length) { this.state.metric = ''; this.state.agg = 'count'; this.step = 'series'; }
+          else this.step = 'metric-for-filter';
+          this.renderStep();
+        },
+      })),
+    });
   }
 
   stepMetricForFilter() {
     const { body } = this.frame({ heading: 'Which number should be measured?', back: 'value' });
     const table = this.tableInfo();
-    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    for (const c of table.columns.filter((col) => isNumericType(col.type))) {
-      this.row(list, {
+    this.list(body, {
+      placeholder: 'Type to find a column',
+      items: table.columns.filter((col) => isNumericType(col.type)).map((c) => ({
         label: c.name,
         detail: c.type,
         selected: this.state.metric === c.name,
         onPick: () => { this.state.metric = c.name; if (this.state.agg === 'count') this.state.agg = 'sum'; this.step = 'agg'; this.renderStep(); },
-      });
-    }
+      })),
+    });
   }
 
   stepAgg() {
@@ -2206,20 +2638,20 @@ class WidgetWizard extends Modal {
       back: this.state.agg === 'count' ? 'measure' : 'agg',
     });
     const table = this.tableInfo();
-    const list = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
-    this.row(list, {
+    const items = [{
       label: 'No split',
       selected: !this.state.series,
       onPick: () => { this.state.series = ''; this.step = 'time'; this.renderStep(); },
-    });
+    }];
     for (const c of table.columns.filter((col) => isTextType(col.type))) {
       if (this.state.filter && c.name === this.state.filter.column) continue;
-      this.row(list, {
+      items.push({
         label: 'By ' + c.name,
         selected: this.state.series === c.name,
         onPick: () => { this.state.series = c.name; if (this.state.viz === 'stat') this.state.viz = 'bar'; this.step = 'time'; this.renderStep(); },
       });
     }
+    this.list(body, { placeholder: 'Type to find a column', items });
   }
 
   stepTime() {
@@ -2230,15 +2662,16 @@ class WidgetWizard extends Modal {
     });
     const table = this.tableInfo();
     body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Time column' });
-    const colList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
     const timeCandidates = table.columns.filter((c) => isTextType(c.type) || /INT/i.test(String(c.type)));
-    for (const c of timeCandidates) {
-      this.row(colList, {
+    this.list(body, {
+      placeholder: 'Type to find a column',
+      autofocus: false,
+      items: timeCandidates.map((c) => ({
         label: c.name,
         selected: this.state.timeColumn === c.name,
         onPick: () => { this.state.timeColumn = c.name; this.renderStep(); },
-      });
-    }
+      })),
+    });
     body.createDiv({ cls: 'icor-sqlv-wizard-group', text: 'Period' });
     const frameList = body.createDiv({ cls: 'icor-sqlv-wizard-list' });
     const pickFrame = (tf) => { this.state.timeframe = tf; this.step = 'look'; this.renderStep(); };
@@ -2769,6 +3202,10 @@ writes these same files; editing them by hand stays fine.
   header picker; a preset or a from/to range is fixed). The plugin
   generates the SQL itself.
 - \`unit\`: shown next to values, for example "kg" or "steps".
+- \`layout\`: the widget's place on the grid, \`{"x":0,"y":0,"w":2,"h":2}\`
+  in square cells. The edit mode (pencil button on the dashboard) writes
+  this when you drag and resize; a widget without one gets a sensible
+  default.
 
 Only read queries run: one statement, starting with SELECT, WITH, PRAGMA or
 EXPLAIN. The plugin never writes to a database.
@@ -3218,6 +3655,8 @@ IcorSqliteViewerPlugin.lib = {
   validTimeframe, resolveTimeframe, timeframeConditions, sqlForWidget,
   pivotSeries, prepareTileForRender, checkWidgetSource, specToJson,
   tileDatabase, tileSql, isNumericType, isTextType, guessTimeColumn,
+  matchesNeedle, colsForWidth, defaultSpanFor, clampLayout, rectsCollide,
+  findSpot, packLayout, normalizeLayout, showAddTile, seriesPaletteFor, barPath,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
   STARTER_DASHBOARDS, DEFAULT_SETTINGS, PRESET_LABELS, AGG_LABELS, DEFAULT_GLOBAL_TIMEFRAME,
 };

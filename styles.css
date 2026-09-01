@@ -1,6 +1,89 @@
 /* ICOR for Life - SQLite Viewer
- * Everything themes through Obsidian's own variables; light and dark both
- * work with no plugin-side palette. */
+ *
+ * INKLINE surface per Iris's spec (03 WiP/2026-09-01-sqlite-viewer-inkline-spec).
+ * The plugin opts out of the theme's element skins (data-ink-plugin) and
+ * draws itself from ONE local token layer. Every token is
+ * var(--ink-X, obsidian-fallback), so the plugin works in any vault and
+ * re-skinning is token-level, never structural. The governing sentence:
+ * a dashboard is an instrument panel. It MEASURES. Ruled lines only.
+ */
+
+/* ------------------------------------------------------ the token layer -- */
+
+[data-ink-plugin="icor-for-life-sqlite-viewer"] {
+  /* grounds */
+  --sqlv-ground: var(--ink, var(--background-primary));
+  --sqlv-card: var(--ink-2, var(--background-secondary));
+  --sqlv-well: var(--ink-3, var(--background-modifier-hover));
+  --sqlv-input: var(--ink-input, var(--background-primary));
+  --sqlv-overlay: var(--ink-overlay, var(--background-secondary));
+  /* ink ladder: quiet is a token step, never an opacity dial */
+  --sqlv-fg: var(--ink-paper, var(--text-normal));
+  --sqlv-fg-dim: var(--ink-paper-dim, var(--text-muted));
+  --sqlv-fg-faint: var(--ink-paper-faint, var(--text-faint));
+  /* marker (the pen) */
+  --sqlv-marker: var(--ink-marker, var(--interactive-accent));
+  --sqlv-marker-fill: var(--ink-marker-fill, var(--interactive-accent));
+  --sqlv-on-marker: var(--ink-on-marker, var(--text-on-accent));
+  --sqlv-marker-border: var(--ink-marker-border, var(--interactive-accent));
+  --sqlv-marker-bg: var(--ink-marker-bg, var(--background-modifier-hover));
+  /* lines */
+  --sqlv-hairline: var(--ink-hairline, var(--background-modifier-border));
+  --sqlv-hairline-subtle: var(--ink-hairline-subtle, var(--background-modifier-border));
+  --sqlv-hairline-strong: var(--ink-hairline-emphasis, var(--background-modifier-border-hover));
+  --sqlv-control-border: var(--ink-control-border, var(--background-modifier-border-hover));
+  --sqlv-hover-wash: var(--ink-hover-wash, var(--background-modifier-hover));
+  --sqlv-float-shadow: var(--ink-float-shadow, var(--shadow-s));
+  --sqlv-destructive: var(--ink-destructive, var(--color-red));
+  --sqlv-destructive-text: var(--ink-destructive-text, var(--text-error));
+  --sqlv-warning: var(--ink-warning, var(--color-orange));
+  /* radii: the corner ladder, fixed rungs */
+  --sqlv-r-subtle: var(--ink-radius-subtle, 10px);
+  --sqlv-r-card: var(--ink-radius-standard, 16px);
+  --sqlv-r-modal: var(--ink-radius-elevated, 20px);
+  --sqlv-r-pill: var(--ink-radius-pill, 999px);
+  --sqlv-r-control: var(--ink-radius-control, 4px);
+  --sqlv-r-micro: var(--ink-radius-micro, 2px);
+  /* spacing: 4px base rungs */
+  --sqlv-s1: 4px;
+  --sqlv-s2: 8px;
+  --sqlv-s3: 12px;
+  --sqlv-s4: 16px;
+  --sqlv-s5: 24px;
+  --sqlv-s6: 32px;
+  --sqlv-s7: 48px;
+  /* type */
+  --sqlv-font-display: var(--ink-font-display, var(--font-interface));
+  --sqlv-font-body: var(--ink-font-body, var(--font-interface));
+  --sqlv-font-mono: var(--ink-font-mono, var(--font-monospace));
+  /* chart series: ink writing first, then the four category lenses */
+  --sqlv-series-1: var(--ink-paper-dim, var(--text-muted));
+  --sqlv-series-2: var(--ink-hue-cyan, var(--color-cyan));
+  --sqlv-series-3: var(--ink-hue-yellow, var(--color-yellow));
+  --sqlv-series-4: var(--ink-hue-indigo, var(--color-purple));
+  --sqlv-series-5: var(--ink-hue-burgundy, var(--color-pink));
+  --sqlv-ease: var(--ink-ease-draw, ease);
+
+  font-family: var(--sqlv-font-body);
+}
+
+/* The kicker voice: mono, small, uppercase, faint. Used by tile titles,
+ * status lines, table headers, crumbs, range labels. */
+.icor-sqlv-kicker,
+.icor-sqlv-dash-status,
+.icor-sqlv-tile-title,
+.icor-sqlv-range-label,
+.icor-sqlv-wizard-crumbs,
+.icor-sqlv-wizard-group,
+.icor-sqlv-console-meta,
+.icor-sqlv-rail-heading {
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--sqlv-fg-faint);
+}
 
 /* ------------------------------------------------------------- layout -- */
 
@@ -9,6 +92,7 @@
   flex-direction: column;
   height: 100%;
   padding: 0;
+  color: var(--sqlv-fg);
 }
 
 .icor-sqlv-blank {
@@ -16,41 +100,40 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--size-4-3);
+  gap: var(--sqlv-s3);
   height: 100%;
-  color: var(--text-muted);
+  color: var(--sqlv-fg-faint);
+  font-size: 13px;
 }
 
 .icor-sqlv-header {
   display: flex;
   align-items: baseline;
-  gap: var(--size-4-2);
-  padding: var(--size-4-2) var(--size-4-3);
-  border-bottom: 1px solid var(--background-modifier-border);
+  gap: var(--sqlv-s2);
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  border-bottom: 1px solid var(--sqlv-hairline);
   flex: 0 0 auto;
 }
 
 .icor-sqlv-header-name {
-  font-weight: var(--font-semibold);
-  color: var(--text-normal);
+  font-family: var(--sqlv-font-display);
+  font-weight: 640;
+  color: var(--sqlv-fg);
 }
 
 .icor-sqlv-header-sub {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-faint);
 }
 
-.icor-sqlv-split {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-}
+.icor-sqlv-split { display: flex; flex: 1 1 auto; min-height: 0; }
 
 .icor-sqlv-rail {
   flex: 0 0 240px;
   overflow-y: auto;
-  border-right: 1px solid var(--background-modifier-border);
-  padding: var(--size-4-2);
+  border-right: 1px solid var(--sqlv-hairline);
+  padding: var(--sqlv-s2);
 }
 
 .icor-sqlv-main {
@@ -58,13 +141,10 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
-  padding: var(--size-4-2) var(--size-4-3);
+  padding: var(--sqlv-s2) var(--sqlv-s3);
 }
 
-.icor-sqlv-grow {
-  flex: 1 1 auto;
-  min-height: 0;
-}
+.icor-sqlv-grow { flex: 1 1 auto; min-height: 0; }
 
 @media (max-width: 600px) {
   .icor-sqlv-split { flex-direction: column; }
@@ -72,48 +152,36 @@
     flex: 0 0 auto;
     max-height: 30%;
     border-right: none;
-    border-bottom: 1px solid var(--background-modifier-border);
+    border-bottom: 1px solid var(--sqlv-hairline);
   }
 }
 
 /* --------------------------------------------------------------- rail -- */
 
-.icor-sqlv-rail-heading {
-  font-size: var(--font-ui-smaller);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-faint);
-  margin: var(--size-4-2) 0 var(--size-2-2);
-}
+.icor-sqlv-rail-heading { margin: var(--sqlv-s2) 0 var(--sqlv-s1); letter-spacing: 0.06em; }
 
 .icor-sqlv-rail-row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--size-2-2);
-  padding: var(--size-2-2) var(--size-2-3);
-  border-radius: var(--radius-s);
+  gap: var(--sqlv-s1);
+  padding: var(--sqlv-s1) var(--sqlv-s2);
+  border-radius: var(--sqlv-r-subtle);
   cursor: pointer;
-  color: var(--text-normal);
+  color: var(--sqlv-fg-dim);
 }
 
-.icor-sqlv-rail-row:hover { background: var(--background-modifier-hover); }
+.icor-sqlv-rail-row:hover { background: var(--sqlv-hover-wash); color: var(--sqlv-fg); }
 
-.icor-sqlv-rail-row.is-active {
-  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
-  font-weight: var(--font-semibold);
-}
+.icor-sqlv-rail-row.is-active { background: var(--sqlv-well); color: var(--sqlv-fg); }
 
-.icor-sqlv-rail-name {
-  overflow-wrap: anywhere;
-  min-width: 0;
-  font-size: var(--font-ui-small);
-}
+.icor-sqlv-rail-name { overflow-wrap: anywhere; min-width: 0; font-size: 13px; }
 
 .icor-sqlv-rail-count {
   flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-faint);
   font-variant-numeric: tabular-nums;
 }
 
@@ -121,14 +189,36 @@
 
 .icor-sqlv-tabs {
   display: flex;
-  gap: var(--size-2-2);
-  margin-bottom: var(--size-4-2);
+  align-items: center;
+  gap: var(--sqlv-s1);
+  margin-bottom: var(--sqlv-s3);
+  border-bottom: 1px solid var(--sqlv-hairline);
   flex: 0 0 auto;
 }
 
+/* Quiet text rows; the active tab's 2px marker underline is this view's
+ * one marker moment. Never an accent-filled pill. */
+.icor-sqlv-tabs button:not(.icor-sqlv-funnel) {
+  all: unset;
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  font-size: 13px;
+  color: var(--sqlv-fg-faint);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 140ms var(--sqlv-ease);
+}
+
+.icor-sqlv-tabs button:not(.icor-sqlv-funnel):hover { color: var(--sqlv-fg-dim); }
+
+.icor-sqlv-tabs button:not(.icor-sqlv-funnel):focus-visible {
+  outline: 2px solid var(--sqlv-marker);
+  outline-offset: 2px;
+}
+
 .icor-sqlv-tabs button.is-active {
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
+  color: var(--sqlv-fg);
+  border-bottom-color: var(--sqlv-marker);
 }
 
 .icor-sqlv-body {
@@ -136,32 +226,32 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
-  gap: var(--size-2-3);
+  gap: var(--sqlv-s2);
 }
 
 /* -------------------------------------------------------------- tables -- */
 
 .icor-sqlv-table-scroll {
   overflow: auto;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-s);
+  border: none;
+  border-radius: 0;
 }
 
 .icor-sqlv-table {
   border-collapse: collapse;
   width: max-content;
   min-width: 100%;
-  font-size: var(--font-ui-small);
+  font-size: 13px;
 }
 
-/* Cells are flat. Every property a theme likes to decorate on generic
- * table elements is set explicitly, so nothing leaks in. */
+/* Flat cells, explicit properties so no theme leaks in. Row rules are
+ * subtle hairlines; no zebra fills. */
 .icor-sqlv-table th,
 .icor-sqlv-table td {
-  padding: var(--size-2-1) var(--size-2-3);
+  padding: var(--sqlv-s1) var(--sqlv-s2);
   margin: 0;
   border: none;
-  border-bottom: 1px solid var(--background-modifier-border);
+  border-bottom: 1px solid var(--sqlv-hairline-subtle);
   border-radius: 0;
   background: transparent;
   box-shadow: none;
@@ -171,72 +261,64 @@
   max-width: 32em;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--sqlv-fg);
 }
 
 .icor-sqlv-table thead th {
   position: sticky;
   top: 0;
-  background: var(--background-secondary);
-  border-bottom: 2px solid var(--background-modifier-border-hover, var(--background-modifier-border));
+  background: var(--sqlv-ground);
+  border-bottom: 1px solid var(--sqlv-hairline);
   z-index: 1;
 }
 
-.icor-sqlv-table tbody tr:hover td { background: var(--background-modifier-hover); }
+.icor-sqlv-tile .icor-sqlv-table thead th { background: var(--sqlv-card); }
 
-.icor-sqlv-num {
-  font-variant-numeric: tabular-nums;
-  text-align: right;
-}
+.icor-sqlv-table tbody tr:hover td { background: var(--sqlv-hover-wash); }
 
-/* The sort control is the whole header cell, but it must not look like a
- * button: `all: unset` clears the theme's pill styling (background,
- * border, radius, padding, shadow), then the few things it should have
- * come back explicitly. */
+.icor-sqlv-num { font-variant-numeric: tabular-nums; text-align: right; }
+
+/* Header cells in the kicker voice; the sorted column's arrow is the
+ * state-ink whisper. */
 .icor-sqlv-table thead button.icor-sqlv-sort {
   all: unset;
   display: flex;
   align-items: baseline;
-  gap: var(--size-2-1);
+  gap: var(--sqlv-s1);
   width: 100%;
   max-width: 100%;
   box-sizing: border-box;
-  font-size: var(--font-ui-smaller);
-  font-weight: var(--font-semibold);
-  color: var(--text-muted);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--sqlv-fg-faint);
   cursor: pointer;
   overflow: hidden;
 }
 
-.icor-sqlv-table thead button.icor-sqlv-sort:hover { color: var(--text-normal); }
+.icor-sqlv-table thead button.icor-sqlv-sort:hover { color: var(--sqlv-fg-dim); }
 
 .icor-sqlv-table thead button.icor-sqlv-sort:focus-visible {
-  outline: 2px solid var(--interactive-accent);
+  outline: 2px solid var(--sqlv-marker);
   outline-offset: 1px;
 }
 
-.icor-sqlv-sort-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  min-width: 0;
-}
+.icor-sqlv-sort-label { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 
-.icor-sqlv-sort-mark {
-  flex: 0 0 auto;
-  color: var(--interactive-accent);
-  font-size: var(--font-ui-smaller);
-}
+.icor-sqlv-sort-mark { flex: 0 0 auto; color: var(--sqlv-marker); font-size: 11px; }
 
-/* The filter row is hidden until the funnel shows it, and then it stays
- * quiet: no boxes, just a hairline underline that wakes up on focus. The
- * view root carries data-ink-plugin, INKLINE's own opt-out from its
- * element-level input skins; the !important marks below are the belt for
- * any other theme that skins bare inputs with weight. Here the theme is
- * the aggressor. */
+th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); }
+
+/* The filter row: hidden behind the funnel, and quiet when shown. The
+ * !important marks are a belt for foreign themes that skin bare inputs;
+ * INKLINE stands down via the opt-out and never needs them. */
 .icor-sqlv-filter-row th {
   position: static;
-  padding: 0 var(--size-2-3) var(--size-2-1);
-  background: var(--background-secondary);
-  border-bottom: 1px solid var(--background-modifier-border);
+  padding: 0 var(--sqlv-s2) var(--sqlv-s1);
+  background: var(--sqlv-ground);
+  border-bottom: 1px solid var(--sqlv-hairline-subtle);
 }
 
 .icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter {
@@ -248,9 +330,9 @@
   padding: 1px 0 !important;
   height: auto !important;
   min-height: 0 !important;
-  font-size: var(--font-ui-smaller);
-  font-family: inherit !important;
-  color: var(--text-normal);
+  font-family: var(--sqlv-font-mono) !important;
+  font-size: 11px;
+  color: var(--sqlv-fg);
   background: transparent !important;
   background-image: none !important;
   border: none !important;
@@ -261,24 +343,22 @@
 }
 
 .icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter::placeholder {
-  color: var(--text-faint);
-  opacity: 0.6;
+  color: var(--sqlv-fg-faint);
 }
 
 .icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter:hover {
   background-image: none !important;
-  border-bottom-color: var(--background-modifier-border) !important;
+  border-bottom-color: var(--sqlv-hairline) !important;
 }
 
 .icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter:focus,
 .icor-sqlv-root .icor-sqlv-table input.icor-sqlv-filter:focus-visible {
   outline: none !important;
-  border-bottom-color: var(--interactive-accent) !important;
+  border-bottom-color: var(--sqlv-marker) !important;
   box-shadow: none !important;
 }
 
-/* The funnel that shows and hides the filter row. The dot says filters
- * are active even while the row is hidden. */
+/* The funnel. The 6px dot says filters are active while hidden. */
 .icor-sqlv-tabs-spacer { flex: 1 1 auto; }
 
 .icor-sqlv-tabs button.icor-sqlv-funnel {
@@ -289,24 +369,16 @@
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: var(--radius-s);
-  color: var(--text-muted);
+  border-radius: var(--sqlv-r-subtle);
+  color: var(--sqlv-fg-faint);
   cursor: pointer;
 }
 
-.icor-sqlv-tabs button.icor-sqlv-funnel:hover {
-  color: var(--text-normal);
-  background: var(--background-modifier-hover);
-}
+.icor-sqlv-tabs button.icor-sqlv-funnel:hover { color: var(--sqlv-fg); background: var(--sqlv-hover-wash); }
 
-.icor-sqlv-tabs button.icor-sqlv-funnel:focus-visible {
-  outline: 2px solid var(--interactive-accent);
-}
+.icor-sqlv-tabs button.icor-sqlv-funnel:focus-visible { outline: 2px solid var(--sqlv-marker); outline-offset: 2px; }
 
-.icor-sqlv-tabs button.icor-sqlv-funnel[aria-pressed="true"] {
-  color: var(--text-normal);
-  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
-}
+.icor-sqlv-tabs button.icor-sqlv-funnel[aria-pressed="true"] { color: var(--sqlv-fg); background: var(--sqlv-well); }
 
 .icor-sqlv-funnel svg { width: 15px; height: 15px; }
 
@@ -315,54 +387,104 @@
   position: absolute;
   top: 3px;
   right: 3px;
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--interactive-accent);
-}
-
-.icor-sqlv-pager {
-  display: flex;
-  align-items: center;
-  gap: var(--size-4-2);
-  flex: 0 0 auto;
-}
-
-.icor-sqlv-pager-info {
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
-  font-variant-numeric: tabular-nums;
+  background: var(--sqlv-marker);
 }
 
 /* ------------------------------------------------------------- console -- */
 
 .icor-sqlv-console {
   width: 100%;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-small);
+  font-family: var(--sqlv-font-mono);
+  font-size: 13px;
+  color: var(--sqlv-fg);
+  background: var(--sqlv-input);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-card);
+  padding: var(--sqlv-s3);
   resize: vertical;
+}
+
+.icor-sqlv-console:focus,
+.icor-sqlv-console:focus-visible {
+  outline: none;
+  border-color: var(--sqlv-marker);
+  box-shadow: 0 0 0 1px var(--sqlv-marker-border);
 }
 
 .icor-sqlv-console-bar {
   display: flex;
   align-items: center;
-  gap: var(--size-4-2);
+  gap: var(--sqlv-s3);
   flex: 0 0 auto;
 }
 
 .icor-sqlv-console-out {
   display: flex;
   flex-direction: column;
-  gap: var(--size-2-3);
+  gap: var(--sqlv-s2);
   overflow: auto;
 }
 
 .icor-sqlv-console-meta {
   display: flex;
   align-items: center;
-  gap: var(--size-4-2);
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
+  gap: var(--sqlv-s3);
+  text-transform: none;
+  letter-spacing: 0.04em;
+}
+
+/* Quiet-well buttons: the default voice for every plugin button. The one
+ * pill lives in the modal bar only. */
+.icor-sqlv-root button:not(.icor-sqlv-sort):not(.icor-sqlv-funnel):not(.icor-sqlv-tile-action):not(.icor-sqlv-edit-toggle),
+.icor-sqlv-dash-bar button,
+.icor-sqlv-wizard button {
+  background: var(--sqlv-well);
+  color: var(--sqlv-fg-dim);
+  border: 1px solid var(--sqlv-hairline);
+  border-radius: var(--sqlv-r-subtle);
+  box-shadow: none;
+  font-family: var(--sqlv-font-body);
+  font-size: 13px;
+  padding: var(--sqlv-s1) var(--sqlv-s3);
+  cursor: pointer;
+  transition: background 140ms var(--sqlv-ease), color 140ms var(--sqlv-ease);
+}
+
+.icor-sqlv-root button:not(.icor-sqlv-sort):not(.icor-sqlv-funnel):not(.icor-sqlv-tile-action):not(.icor-sqlv-edit-toggle):hover,
+.icor-sqlv-dash-bar button:hover,
+.icor-sqlv-wizard button:hover {
+  background: var(--sqlv-overlay);
+  color: var(--sqlv-fg);
+}
+
+.icor-sqlv-root button:focus-visible,
+.icor-sqlv-wizard button:focus-visible {
+  outline: 2px solid var(--sqlv-marker);
+  outline-offset: 2px;
+}
+
+/* THE pill: one per modal, the confirm action. */
+.icor-sqlv-modal-bar button.mod-cta {
+  background: var(--sqlv-marker-fill);
+  color: var(--sqlv-on-marker);
+  border: none;
+  border-radius: var(--sqlv-r-pill);
+  font-weight: 600;
+  padding: var(--sqlv-s2) var(--sqlv-s4);
+}
+
+.icor-sqlv-modal-bar button.mod-cta:hover { background: var(--sqlv-marker-fill); color: var(--sqlv-on-marker); }
+
+/* In-view ctas (Run, Create first dashboard) stay quiet wells. */
+.icor-sqlv-root .icor-sqlv-body button.mod-cta,
+.icor-sqlv-root .icor-sqlv-blank button.mod-cta {
+  background: var(--sqlv-well);
+  color: var(--sqlv-fg);
+  border: 1px solid var(--sqlv-hairline-strong);
+  border-radius: var(--sqlv-r-subtle);
 }
 
 /* ---------------------------------------------------------- dashboards -- */
@@ -370,187 +492,274 @@
 .icor-sqlv-dash-bar {
   display: flex;
   align-items: center;
-  gap: var(--size-4-2);
-  padding: var(--size-4-2) var(--size-4-3);
-  border-bottom: 1px solid var(--background-modifier-border);
+  gap: var(--sqlv-s3);
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  border-bottom: 1px solid var(--sqlv-hairline);
   flex: 0 0 auto;
+}
+
+.icor-sqlv-dash-bar select.dropdown,
+.icor-sqlv-range select.dropdown {
+  background-color: var(--sqlv-well);
+  color: var(--sqlv-fg-dim);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-subtle);
+  box-shadow: none;
+  font-family: var(--sqlv-font-body);
+  font-size: 13px;
+}
+
+.icor-sqlv-dash-bar select.dropdown:focus-visible,
+.icor-sqlv-range select.dropdown:focus-visible {
+  outline: 2px solid var(--sqlv-marker);
+  outline-offset: 2px;
 }
 
 .icor-sqlv-dash {
   overflow-y: auto;
-  padding: var(--size-4-3);
+  padding: var(--sqlv-s4);
   flex: 1 1 auto;
 }
-
-.icor-sqlv-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: var(--size-4-3);
-  margin-top: var(--size-4-2);
-}
-
-.icor-sqlv-tile {
-  background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-m);
-  padding: var(--size-4-2) var(--size-4-3);
-  min-width: 0;
-}
-
-.icor-sqlv-tile.is-stat { display: flex; flex-direction: column; }
-
-.icor-sqlv-tile-title {
-  font-size: var(--font-ui-small);
-  font-weight: var(--font-semibold);
-  color: var(--text-muted);
-  margin-bottom: var(--size-2-3);
-}
-
-.icor-sqlv-tile-body { min-width: 0; }
-
-.icor-sqlv-chart {
-  width: 100%;
-  height: auto;
-  display: block;
-}
-
-.icor-sqlv-grid .icor-sqlv-table-scroll { max-height: 280px; }
-
-.icor-sqlv-chart line,
-.icor-sqlv-chart rect,
-.icor-sqlv-chart path { shape-rendering: geometricPrecision; }
-
-.icor-sqlv-gridline { stroke: var(--background-modifier-border); stroke-width: 1; }
-
-.icor-sqlv-tick {
-  fill: var(--text-faint);
-  font-size: 10px;
-}
-
-.icor-sqlv-guide {
-  stroke: var(--text-faint);
-  stroke-width: 1;
-  stroke-dasharray: 3 3;
-}
-
-.icor-sqlv-readout {
-  fill: var(--text-normal);
-  font-size: 11px;
-  dominant-baseline: hanging;
-}
-
-.icor-sqlv-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--size-2-3) var(--size-4-2);
-  margin-top: var(--size-2-3);
-  font-size: var(--font-ui-smaller);
-  color: var(--text-muted);
-}
-
-.icor-sqlv-legend-item {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--size-2-1);
-}
-
-.icor-sqlv-legend-chip {
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  display: inline-block;
-}
-
-.icor-sqlv-stat { padding: var(--size-2-3) 0; }
-
-.icor-sqlv-stat-value {
-  font-size: 2em;
-  font-weight: var(--font-bold, 700);
-  color: var(--text-normal);
-  font-variant-numeric: tabular-nums;
-}
-
-.icor-sqlv-stat-unit {
-  font-size: 0.5em;
-  color: var(--text-muted);
-  font-weight: var(--font-normal, 400);
-}
-
-.icor-sqlv-stat-caption {
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
-  margin-top: var(--size-2-1);
-}
-
-/* ------------------------------------------------- dashboard builder -- */
 
 .icor-sqlv-dash-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
-  gap: var(--size-4-2);
-  margin-bottom: var(--size-2-3);
+  gap: var(--sqlv-s3);
+  margin-bottom: var(--sqlv-s2);
 }
 
 .icor-sqlv-dash-title { min-width: 0; }
 
+/* The dashboard's one marker moment: the 2.5px rule under the title,
+ * width fit to the text. */
 .icor-sqlv-dash-title-text {
+  display: inline-block;
   margin: 0;
-  font-size: 1.4em;
-  font-weight: var(--font-bold, 700);
-  color: var(--text-normal);
+  font-family: var(--sqlv-font-display);
+  font-size: 24px;
+  font-weight: 640;
+  color: var(--sqlv-fg);
   cursor: text;
-  border-radius: var(--radius-s);
-  padding: var(--size-2-1) var(--size-2-2);
+  border-radius: var(--sqlv-r-subtle);
+  padding: var(--sqlv-s1) var(--sqlv-s1);
   overflow-wrap: anywhere;
 }
 
-.icor-sqlv-dash-title-text:hover { background: var(--background-modifier-hover); }
+.icor-sqlv-dash-title-text::after {
+  content: '';
+  display: block;
+  height: 2.5px;
+  background: var(--sqlv-marker);
+  margin-top: var(--sqlv-s1);
+}
+
+.icor-sqlv-dash-title-text:hover { background: var(--sqlv-hover-wash); }
 
 .icor-sqlv-dash-title-input {
-  font-size: 1.4em;
-  font-weight: var(--font-bold, 700);
-  width: min(24em, 90vw);
+  font-family: var(--sqlv-font-display);
+  font-size: 24px;
+  font-weight: 640;
+  color: var(--sqlv-fg);
+  background: var(--sqlv-input);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-subtle);
+  width: min(20em, 90vw);
 }
 
 .icor-sqlv-range {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--size-2-3);
-}
-
-.icor-sqlv-range-label {
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
+  gap: var(--sqlv-s2);
 }
 
 .icor-sqlv-range-custom {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: var(--size-2-2);
-  margin-top: var(--size-2-2);
+  gap: var(--sqlv-s1);
+  margin-top: var(--sqlv-s1);
 }
 
-.icor-sqlv-dash-status { margin-bottom: var(--size-2-2); }
+.icor-sqlv-range-custom input[type="date"] {
+  background: var(--sqlv-input);
+  color: var(--sqlv-fg);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-subtle);
+  font-family: var(--sqlv-font-body);
+  font-size: 13px;
+}
 
-.icor-sqlv-tile { position: relative; }
+.icor-sqlv-edit-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sqlv-s1);
+  background: var(--sqlv-well);
+  color: var(--sqlv-fg-dim);
+  border: 1px solid var(--sqlv-hairline);
+  border-radius: var(--sqlv-r-subtle);
+  box-shadow: none;
+  font-family: var(--sqlv-font-body);
+  font-size: 13px;
+  padding: var(--sqlv-s1) var(--sqlv-s3);
+  cursor: pointer;
+}
+
+.icor-sqlv-edit-toggle:hover { background: var(--sqlv-overlay); color: var(--sqlv-fg); }
+
+.icor-sqlv-edit-toggle.is-on { background: var(--sqlv-well); color: var(--sqlv-fg); border-color: var(--sqlv-hairline-strong); }
+
+.icor-sqlv-edit-toggle:focus-visible { outline: 2px solid var(--sqlv-marker); outline-offset: 2px; }
+
+.icor-sqlv-edit-toggle svg { width: 13px; height: 13px; }
+
+.icor-sqlv-dash-status { margin-bottom: var(--sqlv-s2); text-transform: uppercase; }
+
+/* The grid: JS sets columns and row height; the gap is a token. */
+.icor-sqlv-grid {
+  display: grid;
+  gap: var(--sqlv-s4);
+  margin-top: var(--sqlv-s2);
+}
+
+.icor-sqlv-tile {
+  position: relative;
+  background: var(--sqlv-card);
+  border: 1px solid var(--sqlv-hairline);
+  border-radius: var(--sqlv-r-card);
+  padding: var(--sqlv-s4);
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+  transition: border-color 140ms var(--sqlv-ease);
+}
+
+.icor-sqlv-tile:hover { border-color: var(--sqlv-hairline-strong); }
+
+.icor-sqlv-tile.is-stat { display: flex; flex-direction: column; }
+
+.icor-sqlv-tile-title { margin-bottom: var(--sqlv-s3); flex: 0 0 auto; }
+
+.icor-sqlv-tile-body { min-width: 0; min-height: 0; flex: 1 1 auto; overflow: hidden; }
+
+.icor-sqlv-chart { width: 100%; height: auto; display: block; }
+
+.icor-sqlv-tile .icor-sqlv-table-scroll { max-height: 100%; }
+
+.icor-sqlv-chart line,
+.icor-sqlv-chart rect,
+.icor-sqlv-chart path { shape-rendering: geometricPrecision; }
+
+/* Horizontal gridlines only; the baseline is the axis. No frames. */
+.icor-sqlv-gridline { stroke: var(--sqlv-hairline-subtle); stroke-width: 1; }
+
+.icor-sqlv-baseline { stroke: var(--sqlv-hairline); stroke-width: 1; }
+
+.icor-sqlv-tick {
+  fill: var(--sqlv-fg-faint);
+  font-family: var(--sqlv-font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The pen points: solid marker guide, marker dots, a chip readout. */
+.icor-sqlv-guide { stroke: var(--sqlv-marker); stroke-width: 1; }
+
+.icor-sqlv-hover-dot { fill: var(--sqlv-marker); }
+
+.icor-sqlv-readout-chip {
+  fill: var(--sqlv-overlay);
+  stroke: var(--sqlv-hairline);
+  stroke-width: 1;
+}
+
+.icor-sqlv-readout {
+  fill: var(--sqlv-fg);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  dominant-baseline: middle;
+}
+
+.icor-sqlv-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sqlv-s1) var(--sqlv-s3);
+  margin-top: var(--sqlv-s2);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-faint);
+  flex: 0 0 auto;
+}
+
+.icor-sqlv-legend-item { display: inline-flex; align-items: center; gap: var(--sqlv-s1); }
+
+.icor-sqlv-legend-chip {
+  width: 10px;
+  height: 10px;
+  border-radius: var(--sqlv-r-micro);
+  display: inline-block;
+}
+
+.icor-sqlv-stat { padding: var(--sqlv-s2) 0; }
+
+.icor-sqlv-stat-value {
+  font-family: var(--sqlv-font-display);
+  font-size: 34px;
+  font-weight: 640;
+  color: var(--sqlv-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.icor-sqlv-stat-unit {
+  font-family: var(--sqlv-font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--sqlv-fg-faint);
+}
+
+.icor-sqlv-stat-caption {
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-faint);
+  margin-top: var(--sqlv-s1);
+}
+
+/* ------------------------------------------------- edit mode: the grid -- */
+
+.icor-sqlv-tile.is-editing { cursor: grab; }
+
+.icor-sqlv-tile.is-editing:focus-visible { outline: 2px solid var(--sqlv-marker); outline-offset: 2px; }
+
+/* Floating chrome: the one sanctioned shadow, on the tile in hand. */
+.icor-sqlv-tile.is-dragging {
+  box-shadow: var(--sqlv-float-shadow);
+  transform: scale(1.02);
+  transition: none;
+  z-index: 10;
+  cursor: grabbing;
+}
+
+.icor-sqlv-drag-surface {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  touch-action: none;
+}
 
 .icor-sqlv-tile-actions {
   position: absolute;
-  top: var(--size-2-2);
-  right: var(--size-2-2);
+  top: var(--sqlv-s2);
+  right: var(--sqlv-s2);
   display: flex;
-  gap: var(--size-2-1);
-  opacity: 0;
-  transition: opacity 120ms ease;
-  z-index: 2;
+  gap: var(--sqlv-s1);
+  z-index: 3;
 }
-
-.icor-sqlv-tile:hover .icor-sqlv-tile-actions,
-.icor-sqlv-tile:focus-within .icor-sqlv-tile-actions { opacity: 1; }
 
 .icor-sqlv-tile-action {
   all: unset;
@@ -559,267 +768,335 @@
   justify-content: center;
   width: 28px;
   height: 28px;
-  border-radius: var(--radius-s);
-  color: var(--text-muted);
+  border-radius: var(--sqlv-r-subtle);
+  color: var(--sqlv-fg-faint);
   cursor: pointer;
-  background: var(--background-secondary);
+  background: var(--sqlv-card);
 }
 
-.icor-sqlv-tile-action:hover { color: var(--text-normal); background: var(--background-modifier-hover); }
+.icor-sqlv-tile-action:hover { color: var(--sqlv-fg); background: var(--sqlv-hover-wash); }
 
-.icor-sqlv-tile-action:focus-visible { outline: 2px solid var(--interactive-accent); }
+.icor-sqlv-tile-action:focus-visible { outline: 2px solid var(--sqlv-marker); outline-offset: 1px; }
 
 .icor-sqlv-tile-action svg { width: 15px; height: 15px; }
 
+/* The resize handle: a ruled L-corner, 10x10 at 2px. */
+.icor-sqlv-resize-handle {
+  position: absolute;
+  right: var(--sqlv-s1);
+  bottom: var(--sqlv-s1);
+  width: 18px;
+  height: 18px;
+  z-index: 3;
+  cursor: nwse-resize;
+  touch-action: none;
+}
+
+.icor-sqlv-resize-handle::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  width: 10px;
+  height: 10px;
+  border-right: 2px solid var(--sqlv-fg-faint);
+  border-bottom: 2px solid var(--sqlv-fg-faint);
+  border-bottom-right-radius: var(--sqlv-r-control);
+}
+
+.icor-sqlv-resize-handle:hover::after { border-color: var(--sqlv-fg); }
+
+.icor-sqlv-tile.is-dragging .icor-sqlv-resize-handle::after { border-color: var(--sqlv-marker); }
+
+/* Dashes mean not-yet-settled: the hole left behind, and the drop cell. */
+.icor-sqlv-drag-hole {
+  border: 1.5px dashed var(--sqlv-hairline-strong);
+  border-radius: var(--sqlv-r-card);
+  background: transparent;
+}
+
+.icor-sqlv-drop-cell {
+  border: 1.5px dashed var(--sqlv-marker-border);
+  border-radius: var(--sqlv-r-card);
+  background: var(--sqlv-marker-bg);
+  z-index: 1;
+}
+
+/* The + tile: the not-yet-traveled cell. An invitation, not the moment. */
 .icor-sqlv-add-tile {
-  order: 999;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: var(--size-2-2);
-  min-height: 120px;
-  border: 2px dashed var(--background-modifier-border);
+  gap: var(--sqlv-s1);
+  border: 1.5px dashed var(--sqlv-hairline-strong);
   background: transparent;
-  color: var(--text-faint);
+  color: var(--sqlv-fg-faint);
   cursor: pointer;
+  box-shadow: none;
 }
 
 .icor-sqlv-add-tile:hover,
 .icor-sqlv-add-tile:focus-visible {
-  color: var(--text-muted);
-  border-color: var(--interactive-accent);
+  color: var(--sqlv-fg-dim);
+  border-color: var(--sqlv-marker-border);
   outline: none;
 }
 
-.icor-sqlv-add-plus svg { width: 28px; height: 28px; }
+.icor-sqlv-add-plus svg { width: 24px; height: 24px; }
 
-.icor-sqlv-add-text { font-size: var(--font-ui-small); }
+.icor-sqlv-add-text {
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
 
 /* ------------------------------------------------------ widget wizard -- */
 
-.icor-sqlv-wizard-modal { max-width: min(560px, 96vw); }
-
-.icor-sqlv-wizard { display: flex; flex-direction: column; gap: var(--size-2-3); }
-
-.icor-sqlv-wizard-crumbs {
-  color: var(--text-faint);
-  font-size: var(--font-ui-smaller);
-  overflow-wrap: anywhere;
+.icor-sqlv-wizard-modal {
+  max-width: min(560px, 96vw);
+  background: var(--sqlv-overlay);
+  border-radius: var(--sqlv-r-modal);
+  box-shadow: var(--sqlv-float-shadow);
 }
 
+.icor-sqlv-wizard { display: flex; flex-direction: column; gap: var(--sqlv-s2); }
+
+.icor-sqlv-wizard-crumbs { overflow-wrap: anywhere; }
+
 .icor-sqlv-wizard-heading {
-  font-size: var(--font-ui-large, 1.1em);
-  font-weight: var(--font-semibold);
-  color: var(--text-normal);
+  font-family: var(--sqlv-font-display);
+  font-size: 20px;
+  font-weight: 640;
+  color: var(--sqlv-fg);
 }
 
 .icor-sqlv-wizard-body {
   display: flex;
   flex-direction: column;
-  gap: var(--size-2-3);
+  gap: var(--sqlv-s2);
   max-height: min(52vh, 480px);
   overflow-y: auto;
 }
 
-.icor-sqlv-wizard-group {
-  font-size: var(--font-ui-smaller);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--text-faint);
-  margin-top: var(--size-2-3);
-}
+.icor-sqlv-wizard-group { margin-top: var(--sqlv-s2); }
 
-.icor-sqlv-wizard-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
+.icor-sqlv-wizard-list { display: flex; flex-direction: column; gap: 2px; }
 
+/* Options are rows, not boxes. */
 .icor-sqlv-wizard-row {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  gap: var(--size-4-2);
-  padding: var(--size-2-3) var(--size-4-2);
+  gap: var(--sqlv-s3);
+  padding: var(--sqlv-s2) var(--sqlv-s3);
   min-height: 34px;
   box-sizing: border-box;
-  border-radius: var(--radius-s);
+  border-radius: var(--sqlv-r-subtle);
   cursor: pointer;
+  background: transparent;
 }
 
-.icor-sqlv-wizard-row:hover { background: var(--background-modifier-hover); }
+.icor-sqlv-wizard-row:hover { background: var(--sqlv-hover-wash); }
 
-.icor-sqlv-wizard-row:focus-visible { outline: 2px solid var(--interactive-accent); }
+.icor-sqlv-wizard-row:focus-visible { outline: 2px solid var(--sqlv-marker); outline-offset: 1px; }
 
 .icor-sqlv-wizard-row.is-selected {
-  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
-  box-shadow: inset 2px 0 0 var(--interactive-accent);
+  background: var(--sqlv-well);
+  box-shadow: inset 2px 0 0 var(--sqlv-marker);
 }
 
-.icor-sqlv-wizard-row-label {
-  color: var(--text-normal);
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
+.icor-sqlv-wizard-row.is-keyboard { background: var(--sqlv-hover-wash); }
+
+.icor-sqlv-wizard-row-label { color: var(--sqlv-fg); min-width: 0; overflow-wrap: anywhere; }
 
 .icor-sqlv-wizard-row-detail {
-  color: var(--text-faint);
-  font-size: var(--font-ui-smaller);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-faint);
   text-align: right;
   flex: 0 1 auto;
 }
 
 .icor-sqlv-wizard-search,
-.icor-sqlv-wizard-input { width: 100%; }
+.icor-sqlv-wizard-input {
+  width: 100%;
+  background: var(--sqlv-input);
+  color: var(--sqlv-fg);
+  border: 1px solid var(--sqlv-control-border);
+  border-radius: var(--sqlv-r-subtle);
+  font-family: var(--sqlv-font-body);
+  font-size: 13px;
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  box-shadow: none;
+}
+
+.icor-sqlv-wizard-search::placeholder,
+.icor-sqlv-wizard-input::placeholder { color: var(--sqlv-fg-faint); }
+
+.icor-sqlv-wizard-search:focus,
+.icor-sqlv-wizard-search:focus-visible,
+.icor-sqlv-wizard-input:focus,
+.icor-sqlv-wizard-input:focus-visible {
+  outline: none;
+  border-color: var(--sqlv-marker);
+  box-shadow: 0 0 0 1px var(--sqlv-marker-border);
+}
 
 .icor-sqlv-wizard-toggle {
   display: flex;
   align-items: center;
-  gap: var(--size-2-2);
-  font-size: var(--font-ui-small);
-  color: var(--text-normal);
+  gap: var(--sqlv-s1);
+  font-size: 13px;
+  color: var(--sqlv-fg);
 }
 
-.icor-sqlv-modal-bar { margin-top: var(--size-4-2); justify-content: flex-end; }
+.icor-sqlv-viz-list { flex-direction: row; flex-wrap: wrap; }
 
-/* Touch: comfortable targets on phones and tablets. */
-@media (pointer: coarse) {
-  .icor-sqlv-wizard-row { min-height: 44px; padding: var(--size-2-3) var(--size-4-2); }
-  .icor-sqlv-tile-actions { opacity: 1; }
-  .icor-sqlv-tile-action { width: 36px; height: 36px; }
-  .icor-sqlv-add-tile { min-height: 140px; }
-  .icor-sqlv-dash-bar button,
-  .icor-sqlv-modal-bar button { min-height: 40px; }
-}
+.icor-sqlv-modal-bar { margin-top: var(--sqlv-s3); justify-content: flex-end; }
 
 /* ---------------------------------------------------------- JSON view -- */
 
 .icor-sqlv-json {
   display: flex;
   flex-direction: column;
-  gap: var(--size-2-3);
+  gap: var(--sqlv-s2);
   height: 100%;
-  padding: var(--size-4-2) var(--size-4-3);
+  padding: var(--sqlv-s2) var(--sqlv-s3);
 }
 
 .icor-sqlv-json-pre {
   flex: 1 1 auto;
   margin: 0;
   overflow: auto;
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-small);
-  color: var(--text-normal);
-  background: var(--background-secondary);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-s);
-  padding: var(--size-4-2);
+  font-family: var(--sqlv-font-mono);
+  font-size: 13px;
+  color: var(--sqlv-fg);
+  background: var(--sqlv-card);
+  border: 1px solid var(--sqlv-hairline);
+  border-radius: var(--sqlv-r-card);
+  padding: var(--sqlv-s3);
   white-space: pre;
 }
 
-.icor-sqlv-json-editor {
-  flex: 1 1 auto;
-  resize: none;
-}
+.icor-sqlv-json-editor { flex: 1 1 auto; resize: none; }
 
 /* ------------------------------------------------------ notes and errors -- */
 
 .icor-sqlv-note {
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
+  color: var(--sqlv-fg-faint);
+  font-size: 13px;
 }
 
+/* Errors: quiet box, destructive left rail; the words ride the error ink. */
 .icor-sqlv-error {
-  color: var(--text-error);
-  font-size: var(--font-ui-small);
-  padding: var(--size-2-3);
-  border: 1px solid var(--background-modifier-error);
-  border-radius: var(--radius-s);
+  color: var(--sqlv-destructive-text);
+  font-size: 13px;
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  border: 1px solid var(--sqlv-hairline);
+  border-left: 3px solid var(--sqlv-destructive);
+  border-radius: var(--sqlv-r-subtle);
   overflow-wrap: anywhere;
 }
 
 .icor-sqlv-error-detail {
-  color: var(--text-muted);
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
+  color: var(--sqlv-fg-dim);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
   white-space: pre-wrap;
-  margin-top: var(--size-2-2);
+  margin-top: var(--sqlv-s1);
 }
 
 .icor-sqlv-empty {
-  color: var(--text-faint);
-  font-size: var(--font-ui-small);
-  padding: var(--size-4-3) 0;
+  color: var(--sqlv-fg-faint);
+  font-size: 13px;
+  padding: var(--sqlv-s4) 0;
   text-align: center;
 }
 
 .icor-sqlv-section-title {
-  font-weight: var(--font-semibold);
-  margin-top: var(--size-4-2);
+  font-weight: 600;
+  color: var(--sqlv-fg);
+  margin-top: var(--sqlv-s3);
 }
 
+/* Warnings: the rail marks state; the words stay ink. */
 .icor-sqlv-warn {
-  border: 1px solid var(--background-modifier-border);
-  border-left: 3px solid var(--color-orange);
-  border-radius: var(--radius-s);
-  padding: var(--size-2-3) var(--size-4-2);
-  margin: var(--size-4-2) 0;
-  color: var(--text-normal);
-  font-size: var(--font-ui-small);
+  border: 1px solid var(--sqlv-hairline);
+  border-left: 3px solid var(--sqlv-warning);
+  border-radius: var(--sqlv-r-subtle);
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  margin: var(--sqlv-s3) 0;
+  color: var(--sqlv-fg);
+  font-size: 13px;
   display: flex;
   flex-direction: column;
-  gap: var(--size-2-2);
+  gap: var(--sqlv-s1);
 }
 
 /* -------------------------------------------------------- index modal -- */
 
-.icor-sqlv-index {
-  display: flex;
-  flex-direction: column;
-  gap: var(--size-2-1);
-}
+.icor-sqlv-index { display: flex; flex-direction: column; gap: 2px; }
 
 .icor-sqlv-index-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--size-4-2);
-  padding: var(--size-2-3);
-  border-radius: var(--radius-s);
+  gap: var(--sqlv-s3);
+  padding: var(--sqlv-s2) var(--sqlv-s3);
+  border-radius: var(--sqlv-r-subtle);
   cursor: pointer;
 }
 
-.icor-sqlv-index-row:hover { background: var(--background-modifier-hover); }
+.icor-sqlv-index-row:hover { background: var(--sqlv-hover-wash); }
 
-.icor-sqlv-index-path { min-width: 0; }
+.icor-sqlv-index-path { min-width: 0; color: var(--sqlv-fg); }
 
 .icor-sqlv-index-folder {
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-faint);
   overflow-wrap: anywhere;
 }
 
 .icor-sqlv-index-size {
   flex: 0 0 auto;
-  color: var(--text-muted);
-  font-size: var(--font-ui-small);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-faint);
   font-variant-numeric: tabular-nums;
 }
 
 .icor-sqlv-move-list {
-  margin: var(--size-4-2) 0;
+  margin: var(--sqlv-s3) 0;
   display: flex;
   flex-direction: column;
-  gap: var(--size-2-3);
-  font-family: var(--font-monospace);
-  font-size: var(--font-ui-smaller);
+  gap: var(--sqlv-s2);
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
   max-height: 40vh;
   overflow-y: auto;
 }
 
 .icor-sqlv-move-row {
-  padding: var(--size-2-2) var(--size-2-3);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: var(--radius-s);
+  padding: var(--sqlv-s1) var(--sqlv-s2);
+  border: 1px solid var(--sqlv-hairline);
+  border-radius: var(--sqlv-r-subtle);
   overflow-wrap: anywhere;
+  color: var(--sqlv-fg);
+}
+
+/* ---------------------------------------------------------------- touch -- */
+
+@media (pointer: coarse) {
+  .icor-sqlv-wizard-row { min-height: 44px; padding: var(--sqlv-s2) var(--sqlv-s3); }
+  .icor-sqlv-tile-action { width: 36px; height: 36px; }
+  .icor-sqlv-resize-handle { width: 32px; height: 32px; }
+  .icor-sqlv-add-tile { min-height: 120px; }
+  .icor-sqlv-dash-bar button,
+  .icor-sqlv-modal-bar button,
+  .icor-sqlv-edit-toggle { min-height: 44px; }
+  .icor-sqlv-tabs button { min-height: 44px; }
 }
