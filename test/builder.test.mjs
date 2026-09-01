@@ -267,9 +267,10 @@ test('the desktop writes a catalog: tables, columns, and the values of small tex
     if (/DISTINCT "local_date"/.test(sql)) return { columns: ['local_date'], rows: Array.from({ length: 201 }, (_, i) => ['d' + i]), ms: 1, engine: 'cli' };
     throw new Error('unexpected: ' + sql);
   };
+  plugin.settings.catalogIncludeValues = true; /* values are opt-in since 0.5.1 */
   await plugin.writeCatalog('07 Data/x.db');
-  const path = '07 Data/Dashboard Cache/catalogs/x.json';
-  assert.equal(adapter.files.has(path), true);
+  const path = lib.catalogPathFor(plugin.settings.cacheFolder, '07 Data/x.db');
+  assert.equal(adapter.files.has(path), true, 'expected ' + path);
   const catalog = JSON.parse(adapter.files.get(path));
   assert.equal(catalog.tables[0].name, 'health_metric');
   assert.deepEqual(catalog.values['health_metric.metric_name'], ['heart_rate', 'step_count']);
@@ -293,7 +294,7 @@ test('the mobile picker reads the catalog when the database cannot be opened', a
   assert.equal(schema.tables[0].name, 'health_metric');
   const values = await plugin.distinctValues('07 Data/big.db', 'health_metric', 'metric_name');
   assert.deepEqual(unwrap(values.values), ['step_count']);
-  await assert.rejects(plugin.distinctValues('07 Data/big.db', 'health_metric', 'source'), /not in the catalog yet/);
+  await assert.rejects(plugin.distinctValues('07 Data/big.db', 'health_metric', 'source'), /Type the exact value instead/);
 });
 
 test('without engine and without catalog, the picker says what to do in plain words', async () => {

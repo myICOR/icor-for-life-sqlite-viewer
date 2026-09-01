@@ -136,3 +136,67 @@ test('count queries share the filter clause', () => {
   const sql = lib.buildCountQuery('t', { filters: { a: 'x' } });
   assert.equal(sql, 'SELECT COUNT(*) AS n FROM "t" WHERE CAST("a" AS TEXT) LIKE \'%x%\' ESCAPE \'\\\'');
 });
+
+/* -------------------------------------------- the 0.5.1 hardening (M1) -- */
+
+test("Vex's probes: a WITH clause cannot lead into a write", () => {
+  for (const sql of [
+    'WITH x AS (SELECT 1) DELETE FROM members',
+    'WITH x AS (SELECT 1) INSERT INTO members VALUES (1)',
+    "WITH x AS (SELECT 1) UPDATE members SET name='z'",
+    'WITH x AS (SELECT 1) REPLACE INTO members VALUES (1)',
+    'WITH x AS (SELECT 1) CREATE TABLE y (a)',
+    'with recursive r as (select 1) drop table members',
+    'EXPLAIN DELETE FROM t',
+    'SELECT 1 UNION SELECT 2; VACUUM',
+  ]) {
+    const r = lib.gateStatement(sql);
+    assert.equal(r.ok, false, sql + ' must be refused');
+  }
+});
+
+test("Vex's probes: write PRAGMAs and every assignment form are refused", () => {
+  for (const sql of [
+    'PRAGMA journal_mode = DELETE',
+    'PRAGMA user_version = 999',
+    'PRAGMA writable_schema = ON',
+    'pragma synchronous = off',
+    'PRAGMA secure_delete = 1',
+    'PRAGMA case_sensitive_like = 1',
+    'PRAGMA journal_mode',
+  ]) {
+    const r = lib.gateStatement(sql);
+    assert.equal(r.ok, false, sql + ' must be refused');
+  }
+  assert.match(lib.gateStatement('PRAGMA writable_schema = ON').reason, /PRAGMA/,
+    'a refused PRAGMA names itself in the reason');
+});
+
+test('the read-only PRAGMAs still pass: introspection is the whole point', () => {
+  for (const sql of [
+    'PRAGMA table_info("health_metric")',
+    'PRAGMA table_info(health_metric)',
+    'PRAGMA index_list("t")',
+    'PRAGMA index_info("idx")',
+    'PRAGMA foreign_key_list("t")',
+    'PRAGMA database_list',
+    'PRAGMA user_version',
+    'PRAGMA integrity_check',
+    'PRAGMA page_count',
+  ]) {
+    assert.equal(lib.gateStatement(sql).ok, true, sql + ' must pass');
+  }
+});
+
+test('write verbs inside names and strings do not trip the hardened gate', () => {
+  for (const sql of [
+    'SELECT created_at, updated_at FROM t',
+    'SELECT * FROM analyze_log WHERE inserted = 1',
+    "SELECT 'please delete me' AS note FROM t",
+    'SELECT "delete" FROM t',
+    'SELECT vacuum_hours, replacement FROM maintenance',
+    "SELECT * FROM pragma_table_info('t')",
+  ]) {
+    assert.equal(lib.gateStatement(sql).ok, true, sql + ' must pass');
+  }
+});

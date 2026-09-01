@@ -198,9 +198,27 @@ inside them; explicit flat styles cover other themes.
 - **No network, no telemetry, no analytics, no accounts.** The plugin
   never connects anywhere.
 - **What it writes**, all inside the vault: dashboard JSON files, the
-  dashboard cache, starter files (once, only when missing), and its own
-  settings. The migration button moves database files only after you
-  confirm an exact list, and never overwrites anything.
+  dashboard cache, starter files (once, only when missing), a schema
+  catalog per database so the phone's picker knows the tables and
+  columns, and its own settings. The migration button moves database
+  files only after you confirm an exact list, and never overwrites
+  anything.
+- **The catalog and your values.** By default the catalog holds structure
+  only: table names, column names, types. The setting "Include category
+  values in the mobile catalog" (off by default) additionally writes the
+  distinct values of small text columns (200 or fewer, for example every
+  metric name or workout type) into that plain JSON file, so phones can
+  offer them as a picker; the file syncs with the vault and is readable
+  like any note. Leave it off for databases holding values you would not
+  put in a note, such as health or contact details; the phone then asks
+  you to type the value instead.
+- **The statement gate is itself read-only.** Beyond the engine flags,
+  the gate refuses write verbs anywhere they appear as statement verbs
+  (a WITH clause cannot lead into a write) and allows only read-only
+  introspection PRAGMAs, never the assignment form.
+- **JSON files**: the "Open JSON files in the vault" setting (on by
+  default) controls whether this plugin claims .json; turn it off if
+  another plugin should own the extension.
 - Never runs your SQL through a shell. Never deletes a file.
 
 ## Install

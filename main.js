@@ -71,6 +71,18 @@ const DB_EXTS = new Set(['db', 'sqlite', 'sqlite3']);
 const SIDECAR_RE = /\.(db|sqlite|sqlite3)-(wal|shm)$/i;
 const SKIP_FOLDERS = new Set(['.obsidian', '.git', '.trash']);
 const ALLOWED_KEYWORDS = new Set(['select', 'with', 'pragma', 'explain']);
+/* Statement verbs that write. Refused anywhere they appear as words in a
+ * stripped statement, because a WITH prefix can lead into any of them. */
+const WRITE_VERBS_RE = /\b(insert|update|delete|replace|create|drop|alter|reindex|vacuum|analyze)\b/i;
+/* The read-only PRAGMA allowlist (introspection only). Everything else,
+ * and every assignment form, is refused. */
+const READ_PRAGMAS = new Set([
+  'table_info', 'table_xinfo', 'table_list', 'index_list', 'index_info', 'index_xinfo',
+  'foreign_key_list', 'database_list', 'collation_list', 'function_list', 'pragma_list',
+  'compile_options', 'freelist_count', 'page_count', 'page_size', 'max_page_count',
+  'schema_version', 'user_version', 'data_version', 'application_id',
+  'integrity_check', 'quick_check', 'encoding', 'journal_size_limit',
+]);
 const VIZ_KINDS = new Set(['line', 'bar', 'stat', 'table']);
 const VIEW_BROWSER = 'icor-sqlite-viewer-browser';
 const VIEW_DASHBOARDS = 'icor-sqlite-viewer-dashboards';
@@ -143,6 +155,10 @@ const DEFAULT_SETTINGS = {
   cacheFolder: '07 Databases/Dashboard Cache',
   dataFolder: '07 Databases',
   sqlite3Path: '',
+  /* The mobile catalog carries structure only unless this is on. */
+  catalogIncludeValues: false,
+  /* The plugin claims .json files for its reader and the dashboards. */
+  openJsonFiles: true,
 };
 
 /* ========================================================================
@@ -275,6 +291,24 @@ function gateStatement(sql) {
   }
   if (/\b(attach|detach)\b/i.test(stripped)) {
     return { ok: false, reason: 'ATTACH is not allowed. This viewer reads one database at a time.' };
+  }
+  /* A WITH clause (or anything else) must not lead into a write. SQLite
+   * accepts WITH x AS (...) DELETE/INSERT/UPDATE as one statement, so the
+   * write verbs are refused wherever they appear as words in the stripped
+   * statement. Identifiers and strings are already masked, so a column
+   * named "delete" cannot trip this and a bare verb cannot hide. */
+  if (WRITE_VERBS_RE.test(stripped)) {
+    return { ok: false, reason: 'Only read queries run here. A statement that writes (INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, VACUUM and friends) is refused, even behind a WITH clause.' };
+  }
+  /* PRAGMA is a family, and half the family writes. Only the read-only
+   * introspection PRAGMAs pass, and never the assignment form. */
+  if (kw === 'pragma') {
+    const m = /^\s*pragma\s+([a-z0-9_]+)\s*(=|\()?/i.exec(stripped);
+    const name = m && m[1] ? m[1].toLowerCase() : '';
+    const isAssignment = !!(m && m[2] === '=');
+    if (!READ_PRAGMAS.has(name) || isAssignment) {
+      return { ok: false, reason: 'That PRAGMA can change the database. Only read-only PRAGMAs run here, for example table_info, index_list or integrity_check.' };
+    }
   }
   return { ok: true };
 }
@@ -573,7 +607,28 @@ function dashCachePath(cacheFolder, dashboardId) {
 
 /* The catalog a desktop writes next to the cache: enough schema for the
  * mobile picker when the database itself cannot be opened there. */
+/* A short stable key for a database: the stem stays readable, the FNV-1a
+ * hash of the full vault path keeps two same-named databases apart. */
+function shortHash(text) {
+  let h = 0x811c9dc5;
+  const s = String(text);
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+function dbKeyOf(dbPath) {
+  return stemOf(dbPath) + '-' + shortHash(normalizePath(dbPath));
+}
+
 function catalogPathFor(cacheFolder, dbPath) {
+  return normalizePath(cacheFolder + '/catalogs/' + dbKeyOf(dbPath) + '.json');
+}
+
+/* Where a 0.5.0 catalog lived, read as a fallback until it regenerates. */
+function legacyCatalogPathFor(cacheFolder, dbPath) {
   return normalizePath(cacheFolder + '/catalogs/' + stemOf(dbPath) + '.json');
 }
 
@@ -1018,6 +1073,25 @@ function showAddTile(tileCount, editMode) {
   return tileCount === 0 || editMode === true;
 }
 
+/* What reaches the developer console: a stable line naming the place and
+ * the error class, never SQL text and never database content. The full
+ * message stays in the on-screen error UI. */
+function safeLogLine(context, e) {
+  return 'ICOR SQLite Viewer: ' + context + ' (' + ((e && e.name) || 'Error') + ')';
+}
+
+/* The sqlite3 path setting runs whatever it points to, so its shape is
+ * checked before it is saved: absolute, and the file name says sqlite3. */
+function checkSqlite3Path(path) {
+  const p = String(path || '').trim();
+  if (!p) return { ok: true, empty: true };
+  const absolute = p.startsWith('/') || /^[A-Za-z]:[\\/]/.test(p);
+  if (!absolute) return { ok: false, reason: 'Use a full path, for example /usr/bin/sqlite3.' };
+  const base = p.split(/[\\/]/).pop().toLowerCase();
+  if (!base.includes('sqlite3')) return { ok: false, reason: 'The file name should contain sqlite3. The plugin runs whatever this points to, so it only accepts a binary that at least says it is sqlite3.' };
+  return { ok: true, path: p };
+}
+
 /* --------------------------------------------------- comparison rules -- */
 
 const COMPARE_LABELS = { none: 'No comparison', previous: 'Previous period', last_year: 'Same period last year' };
@@ -1093,6 +1167,7 @@ function makeDesktopDeps() {
   return {
     childProcess: require('child_process'),
     pathx: require('path'),
+    fsx: require('fs'),
   };
 }
 
@@ -2079,7 +2154,7 @@ class SqliteDashboardsView extends ItemView {
     el.createDiv({ text: 'The dashboards could not be drawn. This is a plugin problem, not a data problem.' });
     el.createDiv({ text: String((e && e.message) || e) });
     if (e && e.stack) el.createDiv({ cls: 'icor-sqlv-error-detail', text: String(e.stack).split('\n').slice(0, 4).join('\n') });
-    console.error('ICOR SQLite Viewer: dashboards failed to render', e);
+    console.error(safeLogLine('dashboards failed to render', e));
   }
 
   async saveAndRender(spec) {
@@ -3132,7 +3207,19 @@ class WidgetFormModal extends Modal {
               onPick: () => this.pick(() => { row.value = v; }),
             })),
           });
-        }).catch((e) => { panel.empty(); panel.createDiv({ cls: 'icor-sqlv-error', text: e.message }); });
+        }).catch((e) => {
+          /* No value list on this device: degrade to typed entry, with the
+           * column named, instead of a dead end. */
+          if (this.openPicker !== 'filter-' + i) return;
+          panel.empty();
+          panel.createDiv({ cls: 'icor-sqlv-note', text: e.message });
+          const input = panel.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: row.value || '' });
+          input.setAttribute('placeholder', 'Exact value of ' + row.column);
+          input.setAttribute('aria-label', 'Exact value of ' + row.column);
+          const use = panel.createEl('button', { text: 'Use this value' });
+          use.addEventListener('click', () => this.pick(() => { row.value = input.value; }));
+          if (typeof input.focus === 'function') input.focus();
+        });
       }
     });
     const add = wrap.createEl('button', { text: '+ Add filter', cls: 'icor-sqlv-add-filter' });
@@ -3392,9 +3479,18 @@ class SqliteViewerSettingTab extends PluginSettingTab {
     if (Platform.isDesktopApp) {
       new Setting(containerEl)
         .setName('Path to sqlite3')
-        .setDesc('Leave empty to use the system sqlite3. Set a full path if yours lives somewhere unusual.')
+        .setDesc('Leave empty to use the system sqlite3. Set a full path if yours lives somewhere unusual. Careful: the plugin runs whatever this points to, so only point it at a sqlite3 binary you trust.')
         .addText((t) => t.setValue(this.plugin.settings.sqlite3Path).onChange(async (v) => {
-          this.plugin.settings.sqlite3Path = v.trim();
+          const check = checkSqlite3Path(v);
+          if (!check.ok) { new Notice(check.reason); return; }
+          if (!check.empty) {
+            const deps = this.plugin.query.deps;
+            if (deps && deps.fsx && !deps.fsx.existsSync(check.path)) {
+              new Notice('Nothing exists at that path. The setting was not saved.');
+              return;
+            }
+          }
+          this.plugin.settings.sqlite3Path = check.empty ? '' : check.path;
           await this.plugin.saveSettings();
           await this.plugin.query.detect();
         }));
@@ -3407,6 +3503,24 @@ class SqliteViewerSettingTab extends PluginSettingTab {
           if (Number.isFinite(n) && n >= 1 && n <= 600) { this.plugin.settings.queryTimeoutSec = n; await this.plugin.saveSettings(); }
         }));
     }
+
+    new Setting(containerEl)
+      .setName('Include category values in the mobile catalog')
+      .setDesc('Off by default. When on, the desktop writes the distinct values of small text columns (200 or fewer values, for example every metric name, workout type or category) into a plain JSON file in the cache folder, so phones can offer them as a picker. That file syncs with the vault and is readable and searchable like any note. Leave this off if a database holds values you would not put in a note, for example health or contact details; the phone picker then asks you to type the value instead.')
+      .addToggle((t) => t.setValue(this.plugin.settings.catalogIncludeValues).onChange(async (v) => {
+        this.plugin.settings.catalogIncludeValues = v;
+        if (this.plugin.catalogged) this.plugin.catalogged.clear();
+        await this.plugin.saveSettings();
+      }));
+
+    new Setting(containerEl)
+      .setName('Open JSON files in the vault')
+      .setDesc('When on, clicking a .json file opens it in this plugin: a dashboard file opens as its dashboard, any other JSON in a clean read-only viewer. Turn it off if another plugin should own .json files. Takes effect after the plugin reloads.')
+      .addToggle((t) => t.setValue(this.plugin.settings.openJsonFiles).onChange(async (v) => {
+        this.plugin.settings.openJsonFiles = v;
+        await this.plugin.saveSettings();
+        new Notice('Reload the plugin (or restart Obsidian) to apply this.');
+      }));
 
     new Setting(containerEl).setName('Tidy up').setHeading();
     new Setting(containerEl)
@@ -3466,7 +3580,7 @@ class JsonFileView extends FileView {
               await view.reload();
             }
           } catch (e) {
-            console.error('ICOR SQLite Viewer: could not open the dashboard for ' + file.path, e);
+            console.error(safeLogLine('could not open the dashboard view', e));
           }
         }, 0);
         return;
@@ -3781,10 +3895,12 @@ class IcorSqliteViewerPlugin extends Plugin {
     } catch (e) {
       new Notice('Another plugin already opens .db files. Use the "SQLite Viewer: List databases" command instead.');
     }
-    try {
-      this.registerExtensions(['json'], VIEW_JSON);
-    } catch (e) {
-      new Notice('Another plugin already opens .json files, so this plugin leaves them to it.');
+    if (this.settings.openJsonFiles) {
+      try {
+        this.registerExtensions(['json'], VIEW_JSON);
+      } catch (e) {
+        new Notice('Another plugin already opens .json files, so this plugin leaves them to it.');
+      }
     }
 
     this.addRibbonIcon('bar-chart-3', 'Open dashboards', () => this.openDashboards());
@@ -4022,17 +4138,24 @@ class IcorSqliteViewerPlugin extends Plugin {
     if (catalog && catalog.values && catalog.values[key]) {
       return { values: catalog.values[key], truncated: false };
     }
-    throw new Error('The values of ' + column + ' are not in the catalog yet. Open this database once on the desktop and sync.');
+    throw new Error('The values of ' + column + ' are not listed on this device. The catalog carries them only when "Include category values in the mobile catalog" is on and the desktop has synced since. Type the exact value instead.');
   }
 
   async readCatalog(dbPath) {
     const adapter = this.app.vault.adapter;
-    const path = catalogPathFor(this.settings.cacheFolder, dbPath);
-    if (!(await adapter.exists(path))) return null;
-    try {
-      const catalog = JSON.parse(await adapter.read(path));
-      if (catalog && Array.isArray(catalog.tables)) return catalog;
-    } catch (e) { /* an unreadable catalog reads as none */ }
+    const candidates = [
+      catalogPathFor(this.settings.cacheFolder, dbPath),
+      legacyCatalogPathFor(this.settings.cacheFolder, dbPath),
+    ];
+    for (const path of candidates) {
+      if (!(await adapter.exists(path))) continue;
+      try {
+        const catalog = JSON.parse(await adapter.read(path));
+        /* A legacy stem-keyed file may belong to a same-named database in
+         * another folder; trust it only when it names this database. */
+        if (catalog && Array.isArray(catalog.tables) && (!catalog.database || catalog.database === dbPath)) return catalog;
+      } catch (e) { /* an unreadable catalog reads as none */ }
+    }
     return null;
   }
 
@@ -4046,7 +4169,7 @@ class IcorSqliteViewerPlugin extends Plugin {
     if (this.catalogged.has(dbPath)) return;
     this.catalogged.add(dbPath);
     this.writeCatalog(dbPath).catch((e) => {
-      console.error('ICOR SQLite Viewer: catalog for ' + dbPath + ' failed', e);
+      console.error(safeLogLine('the catalog write failed', e));
       this.catalogged.delete(dbPath);
     });
   }
@@ -4054,18 +4177,22 @@ class IcorSqliteViewerPlugin extends Plugin {
   async writeCatalog(dbPath) {
     const schema = await this.schemaFor(dbPath);
     if (!schema.live) return;
+    /* Structure only by default. Raw values move into the synced catalog
+     * only when the member turned the setting on (M2, Vex 2026-09-01). */
     const values = {};
-    for (const table of schema.tables) {
-      for (const col of table.columns) {
-        if (!isTextType(col.type)) continue;
-        try {
-          const res = await this.query.query(dbPath,
-            'SELECT DISTINCT ' + quoteIdent(col.name) + ' FROM ' + quoteIdent(table.name) +
-            ' WHERE ' + quoteIdent(col.name) + ' IS NOT NULL LIMIT 201');
-          if (res.rows.length > 0 && res.rows.length <= 200) {
-            values[table.name + '.' + col.name] = res.rows.map((r) => String(r[0])).sort();
-          }
-        } catch (e) { /* a column that will not enumerate is left out */ }
+    if (this.settings.catalogIncludeValues) {
+      for (const table of schema.tables) {
+        for (const col of table.columns) {
+          if (!isTextType(col.type)) continue;
+          try {
+            const res = await this.query.query(dbPath,
+              'SELECT DISTINCT ' + quoteIdent(col.name) + ' FROM ' + quoteIdent(table.name) +
+              ' WHERE ' + quoteIdent(col.name) + ' IS NOT NULL LIMIT 201');
+            if (res.rows.length > 0 && res.rows.length <= 200) {
+              values[table.name + '.' + col.name] = res.rows.map((r) => String(r[0])).sort();
+            }
+          } catch (e) { /* a column that will not enumerate is left out */ }
+        }
       }
     }
     const adapter = this.app.vault.adapter;
@@ -4097,6 +4224,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
+  shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
   STARTER_DASHBOARDS, DEFAULT_SETTINGS, PRESET_LABELS, AGG_LABELS, DEFAULT_GLOBAL_TIMEFRAME,
 };
