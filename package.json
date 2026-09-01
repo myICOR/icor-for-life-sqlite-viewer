@@ -1,0 +1,7 @@
+{
+  "name": "icor-for-life-sqlite-viewer",
+  "private": true,
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  }
+}

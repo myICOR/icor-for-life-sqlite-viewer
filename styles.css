@@ -1,0 +1,454 @@
+/* ICOR for Life - SQLite Viewer
+ * Everything themes through Obsidian's own variables; light and dark both
+ * work with no plugin-side palette. */
+
+/* ------------------------------------------------------------- layout -- */
+
+.icor-sqlv-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+
+.icor-sqlv-blank {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--size-4-3);
+  height: 100%;
+  color: var(--text-muted);
+}
+
+.icor-sqlv-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--size-4-2);
+  padding: var(--size-4-2) var(--size-4-3);
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+}
+
+.icor-sqlv-header-name {
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.icor-sqlv-header-sub {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.icor-sqlv-split {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.icor-sqlv-rail {
+  flex: 0 0 240px;
+  overflow-y: auto;
+  border-right: 1px solid var(--background-modifier-border);
+  padding: var(--size-4-2);
+}
+
+.icor-sqlv-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--size-4-2) var(--size-4-3);
+}
+
+.icor-sqlv-grow {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+@media (max-width: 600px) {
+  .icor-sqlv-split { flex-direction: column; }
+  .icor-sqlv-rail {
+    flex: 0 0 auto;
+    max-height: 30%;
+    border-right: none;
+    border-bottom: 1px solid var(--background-modifier-border);
+  }
+}
+
+/* --------------------------------------------------------------- rail -- */
+
+.icor-sqlv-rail-heading {
+  font-size: var(--font-ui-smaller);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-faint);
+  margin: var(--size-4-2) 0 var(--size-2-2);
+}
+
+.icor-sqlv-rail-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--size-2-2);
+  padding: var(--size-2-2) var(--size-2-3);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+  color: var(--text-normal);
+}
+
+.icor-sqlv-rail-row:hover { background: var(--background-modifier-hover); }
+
+.icor-sqlv-rail-row.is-active {
+  background: var(--background-modifier-active-hover, var(--background-modifier-hover));
+  font-weight: var(--font-semibold);
+}
+
+.icor-sqlv-rail-name {
+  overflow-wrap: anywhere;
+  min-width: 0;
+  font-size: var(--font-ui-small);
+}
+
+.icor-sqlv-rail-count {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --------------------------------------------------------------- tabs -- */
+
+.icor-sqlv-tabs {
+  display: flex;
+  gap: var(--size-2-2);
+  margin-bottom: var(--size-4-2);
+  flex: 0 0 auto;
+}
+
+.icor-sqlv-tabs button.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+
+.icor-sqlv-body {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: var(--size-2-3);
+}
+
+/* -------------------------------------------------------------- tables -- */
+
+.icor-sqlv-table-scroll {
+  overflow: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
+.icor-sqlv-table {
+  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  font-size: var(--font-ui-small);
+}
+
+.icor-sqlv-table th,
+.icor-sqlv-table td {
+  padding: var(--size-2-1) var(--size-2-3);
+  border-bottom: 1px solid var(--background-modifier-border);
+  text-align: left;
+  white-space: nowrap;
+  max-width: 32em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icor-sqlv-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--background-secondary);
+  z-index: 1;
+}
+
+.icor-sqlv-table tbody tr:hover { background: var(--background-modifier-hover); }
+
+.icor-sqlv-num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.icor-sqlv-sort {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  font: inherit;
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+  cursor: pointer;
+}
+
+.icor-sqlv-filter-row th { padding: var(--size-2-1); }
+
+.icor-sqlv-filter {
+  width: 100%;
+  min-width: 6em;
+  font-size: var(--font-ui-smaller);
+}
+
+.icor-sqlv-pager {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  flex: 0 0 auto;
+}
+
+.icor-sqlv-pager-info {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------- console -- */
+
+.icor-sqlv-console {
+  width: 100%;
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-small);
+  resize: vertical;
+}
+
+.icor-sqlv-console-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  flex: 0 0 auto;
+}
+
+.icor-sqlv-console-out {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-3);
+  overflow: auto;
+}
+
+.icor-sqlv-console-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+/* ---------------------------------------------------------- dashboards -- */
+
+.icor-sqlv-dash-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  padding: var(--size-4-2) var(--size-4-3);
+  border-bottom: 1px solid var(--background-modifier-border);
+  flex: 0 0 auto;
+}
+
+.icor-sqlv-dash {
+  overflow-y: auto;
+  padding: var(--size-4-3);
+  flex: 1 1 auto;
+}
+
+.icor-sqlv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: var(--size-4-3);
+  margin-top: var(--size-4-2);
+}
+
+.icor-sqlv-tile {
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-m);
+  padding: var(--size-4-2) var(--size-4-3);
+  min-width: 0;
+}
+
+.icor-sqlv-tile.is-stat { display: flex; flex-direction: column; }
+
+.icor-sqlv-tile-title {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  color: var(--text-muted);
+  margin-bottom: var(--size-2-3);
+}
+
+.icor-sqlv-tile-body { min-width: 0; }
+
+.icor-sqlv-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.icor-sqlv-grid .icor-sqlv-table-scroll { max-height: 280px; }
+
+.icor-sqlv-chart line,
+.icor-sqlv-chart rect,
+.icor-sqlv-chart path { shape-rendering: geometricPrecision; }
+
+.icor-sqlv-gridline { stroke: var(--background-modifier-border); stroke-width: 1; }
+
+.icor-sqlv-tick {
+  fill: var(--text-faint);
+  font-size: 10px;
+}
+
+.icor-sqlv-guide {
+  stroke: var(--text-faint);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.icor-sqlv-readout {
+  fill: var(--text-normal);
+  font-size: 11px;
+  dominant-baseline: hanging;
+}
+
+.icor-sqlv-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--size-2-3) var(--size-4-2);
+  margin-top: var(--size-2-3);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+}
+
+.icor-sqlv-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-1);
+}
+
+.icor-sqlv-legend-chip {
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.icor-sqlv-stat { padding: var(--size-2-3) 0; }
+
+.icor-sqlv-stat-value {
+  font-size: 2em;
+  font-weight: var(--font-bold, 700);
+  color: var(--text-normal);
+  font-variant-numeric: tabular-nums;
+}
+
+.icor-sqlv-stat-unit {
+  font-size: 0.5em;
+  color: var(--text-muted);
+  font-weight: var(--font-normal, 400);
+}
+
+.icor-sqlv-stat-caption {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  margin-top: var(--size-2-1);
+}
+
+/* ------------------------------------------------------ notes and errors -- */
+
+.icor-sqlv-note {
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+}
+
+.icor-sqlv-error {
+  color: var(--text-error);
+  font-size: var(--font-ui-small);
+  padding: var(--size-2-3);
+  border: 1px solid var(--background-modifier-error);
+  border-radius: var(--radius-s);
+  overflow-wrap: anywhere;
+}
+
+.icor-sqlv-empty {
+  color: var(--text-faint);
+  font-size: var(--font-ui-small);
+  padding: var(--size-4-3) 0;
+  text-align: center;
+}
+
+.icor-sqlv-section-title {
+  font-weight: var(--font-semibold);
+  margin-top: var(--size-4-2);
+}
+
+.icor-sqlv-warn {
+  border: 1px solid var(--background-modifier-border);
+  border-left: 3px solid var(--color-orange);
+  border-radius: var(--radius-s);
+  padding: var(--size-2-3) var(--size-4-2);
+  margin: var(--size-4-2) 0;
+  color: var(--text-normal);
+  font-size: var(--font-ui-small);
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-2);
+}
+
+/* -------------------------------------------------------- index modal -- */
+
+.icor-sqlv-index {
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-1);
+}
+
+.icor-sqlv-index-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--size-4-2);
+  padding: var(--size-2-3);
+  border-radius: var(--radius-s);
+  cursor: pointer;
+}
+
+.icor-sqlv-index-row:hover { background: var(--background-modifier-hover); }
+
+.icor-sqlv-index-path { min-width: 0; }
+
+.icor-sqlv-index-folder {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  overflow-wrap: anywhere;
+}
+
+.icor-sqlv-index-size {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-variant-numeric: tabular-nums;
+}
+
+.icor-sqlv-move-list {
+  margin: var(--size-4-2) 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--size-2-3);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+.icor-sqlv-move-row {
+  padding: var(--size-2-2) var(--size-2-3);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+  overflow-wrap: anywhere;
+}

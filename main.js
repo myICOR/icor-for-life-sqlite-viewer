@@ -1,0 +1,1880 @@
+/* ICOR for Life - SQLite Viewer
+ *
+ * Open, browse and chart the SQLite databases that live inside the vault,
+ * read-only, on every device.
+ *
+ * The shape, in one paragraph. A vault can carry real databases next to its
+ * notes: an Apple Health archive of fifteen million rows, an engagement log,
+ * an analytics snapshot store. This plugin opens them where they are. Click
+ * a `.db` file and a browser opens: tables with row counts, the schema, the
+ * data page by page, and a console for your own read-only SQL. Dashboards
+ * are small JSON files in the vault; the plugin runs their queries and draws
+ * the charts itself, in the vault's own colors. Nothing is ever written to
+ * a database, by design and by a tested gate.
+ *
+ * THE ONE RULE: read, never write. Enforced twice. Every database is opened
+ * read-only (the `-readonly` flag plus a `mode=ro` file URI on the desktop,
+ * an in-memory copy on mobile), and every statement passes a gate first:
+ * exactly one statement, starting with SELECT, WITH, PRAGMA or EXPLAIN,
+ * with ATTACH refused outright. The gate lives in the pure library and is
+ * measured in test/gate.test.mjs.
+ *
+ * Two engines, chosen per database:
+ *
+ *   ENGINE A (desktop): the system `sqlite3` command line tool, one process
+ *   per query, results as JSON. This is how a 6 GB database answers in
+ *   milliseconds: the file is never loaded, the indexes do the work. The
+ *   SQL travels as an argument to execFile, never through a shell.
+ *
+ *   ENGINE B (mobile, and desktop fallback): sql.js, a WebAssembly build of
+ *   SQLite vendored into the plugin folder. It loads the whole file into
+ *   memory, so a size cap (default 200 MB) guards it, with a plain
+ *   explanation when a database is over the cap.
+ *
+ * Databases over the cap still reach the phone through the DASHBOARD CACHE:
+ * when a dashboard renders on the desktop, its query results are written as
+ * JSON into the vault, Obsidian Sync carries them, and the phone renders
+ * the same dashboard from the cache with a visible "computed on desktop"
+ * line. The big file itself never travels.
+ *
+ * Three layers, top to bottom of this file:
+ *
+ *   1. A pure library: the statement gate, the row cap, query building for
+ *      the browser, CSV export, dashboard spec parsing, migration planning,
+ *      chart scales. No Obsidian, no fs. Exposed as
+ *      `IcorSqliteViewerPlugin.lib` for the gates.
+ *   2. The engines: the sqlite3 process runner and the sql.js loader. Every
+ *      child_process and path handle arrives through a `deps` object built
+ *      inside a function behind `Platform.isDesktopApp`, so the module
+ *      loads clean on a phone and the gates can hand in a fake process
+ *      runner and watch the arguments.
+ *   3. The Obsidian surface: the database browser view, the dashboards
+ *      view, the database index, the settings tab and the migration modal.
+ *
+ * Hand-written CommonJS, no build step, no runtime npm dependencies. The
+ * one vendored exception is sql.js (sql-wasm.js + sql-wasm.wasm, pinned
+ * 1.13.0, MIT, see THIRD-PARTY-NOTICES.md). Plain words in every string the
+ * member reads.
+ */
+
+'use strict';
+
+const {
+  Plugin, PluginSettingTab, Setting, Modal, Notice, Platform, setIcon,
+  ItemView, FileView, TFile, normalizePath,
+} = require('obsidian');
+
+/* ------------------------------------------------------------ constants -- */
+
+const MB = 1024 * 1024;
+const DB_EXTS = new Set(['db', 'sqlite', 'sqlite3']);
+const SIDECAR_RE = /\.(db|sqlite|sqlite3)-(wal|shm)$/i;
+const SKIP_FOLDERS = new Set(['.obsidian', '.git', '.trash']);
+const ALLOWED_KEYWORDS = new Set(['select', 'with', 'pragma', 'explain']);
+const VIZ_KINDS = new Set(['line', 'bar', 'stat', 'table']);
+const VIEW_BROWSER = 'icor-sqlite-viewer-browser';
+const VIEW_DASHBOARDS = 'icor-sqlite-viewer-dashboards';
+const CLI_MAX_BUFFER = 64 * MB;
+/* The vault's chart colors, in series order. All Obsidian variables. */
+const SERIES_COLORS = [
+  'var(--color-blue)', 'var(--color-orange)', 'var(--color-green)',
+  'var(--color-purple)', 'var(--color-red)', 'var(--color-cyan)',
+  'var(--color-yellow)', 'var(--color-pink)',
+];
+
+const DEFAULT_SETTINGS = {
+  pageSize: 50,
+  rowCap: 500,
+  queryTimeoutSec: 30,
+  mobileCapMb: 200,
+  dashboardFolder: '07 Data/Dashboards',
+  cacheFolder: '07 Data/Dashboard Cache',
+  dataFolder: '07 Data',
+  sqlite3Path: '',
+};
+
+/* ========================================================================
+ * 1. THE PURE LIBRARY
+ * ====================================================================== */
+
+function extOf(path) {
+  const slash = path.lastIndexOf('/');
+  const dot = path.lastIndexOf('.');
+  return dot > slash + 1 ? path.slice(dot + 1).toLowerCase() : '';
+}
+
+function baseName(path) { return path.split('/').pop(); }
+
+function stemOf(path) {
+  const name = baseName(path);
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+function formatBytes(n) {
+  n = Number(n) || 0;
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  const s = i === 0 ? String(v) : v.toFixed(2).replace(/\.?0+$/, '');
+  return s + ' ' + units[i];
+}
+
+function formatNumber(v) {
+  if (v === null || v === undefined) return '';
+  if (typeof v !== 'number') return String(v);
+  if (!Number.isFinite(v)) return String(v);
+  if (Number.isInteger(v)) return v.toLocaleString('en-US');
+  const rounded = Math.round(v * 100) / 100;
+  return rounded.toLocaleString('en-US', { maximumFractionDigits: 2 });
+}
+
+/* "computed on desktop, 3 hours ago" - the honest line under a cached tile. */
+function relativeTime(iso, nowMs) {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return 'at an unknown time';
+  const s = Math.max(0, Math.floor(((nowMs === undefined ? Date.now() : nowMs) - then) / 1000));
+  if (s < 60) return 'just now';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m === 1 ? '1 minute ago' : m + ' minutes ago';
+  const h = Math.floor(m / 60);
+  if (h < 24) return h === 1 ? '1 hour ago' : h + ' hours ago';
+  const d = Math.floor(h / 24);
+  if (d < 31) return d === 1 ? '1 day ago' : d + ' days ago';
+  return 'on ' + iso.slice(0, 10);
+}
+
+/* --------------------------------------------------- the statement gate -- */
+
+/* Blank out comments and the contents of every string and quoted identifier,
+ * keeping the length, so the gate can look for keywords and semicolons
+ * without being fooled by 'attach' inside a string. Handles 'text' with ''
+ * escapes, "identifiers", `identifiers`, [identifiers], -- comments and
+ * block comments. Returns null when a quote never closes. */
+function stripSqlNoise(sql) {
+  const src = String(sql);
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  while (i < n) {
+    const c = src[i];
+    if (c === "'" || c === '"' || c === '`') {
+      let j = i + 1;
+      for (;;) {
+        if (j >= n) return null;
+        if (src[j] === c) {
+          if (src[j + 1] === c) { j += 2; continue; }
+          break;
+        }
+        j++;
+      }
+      out += c + ' '.repeat(j - i - 1) + c;
+      i = j + 1;
+    } else if (c === '[') {
+      const j = src.indexOf(']', i + 1);
+      if (j < 0) return null;
+      out += '[' + ' '.repeat(j - i - 1) + ']';
+      i = j + 1;
+    } else if (c === '-' && src[i + 1] === '-') {
+      let j = src.indexOf('\n', i);
+      if (j < 0) j = n;
+      out += ' '.repeat(j - i);
+      i = j;
+    } else if (c === '/' && src[i + 1] === '*') {
+      const j = src.indexOf('*/', i + 2);
+      if (j < 0) return null;
+      out += ' '.repeat(j + 2 - i);
+      i = j + 2;
+    } else {
+      out += c;
+      i++;
+    }
+  }
+  return out;
+}
+
+function firstKeywordOf(stripped) {
+  const m = /^\s*([a-zA-Z_]+)/.exec(stripped);
+  return m ? m[1].toLowerCase() : '';
+}
+
+/* The gate every statement passes before any engine sees it. Exactly one
+ * statement, read-only verbs only, no ATTACH. Returns { ok: true } or
+ * { ok: false, reason } with the reason in plain words. */
+function gateStatement(sql) {
+  if (!sql || !String(sql).trim()) {
+    return { ok: false, reason: 'The query is empty.' };
+  }
+  const stripped = stripSqlNoise(sql);
+  if (stripped === null) {
+    return { ok: false, reason: 'A quote or comment never closes. Check the query for an unmatched \' or /*.' };
+  }
+  if (!stripped.trim()) {
+    return { ok: false, reason: 'The query is empty.' };
+  }
+  const semi = stripped.indexOf(';');
+  if (semi >= 0 && stripped.slice(semi + 1).trim() !== '') {
+    return { ok: false, reason: 'One statement at a time. Remove everything after the first semicolon.' };
+  }
+  const kw = firstKeywordOf(stripped);
+  if (!ALLOWED_KEYWORDS.has(kw)) {
+    return { ok: false, reason: 'Only read queries run here. Start with SELECT, WITH, PRAGMA or EXPLAIN.' };
+  }
+  if (/\b(attach|detach)\b/i.test(stripped)) {
+    return { ok: false, reason: 'ATTACH is not allowed. This viewer reads one database at a time.' };
+  }
+  return { ok: true };
+}
+
+/* Add a LIMIT to a browsing query that has none, so a careless SELECT over
+ * fifteen million rows comes back as a page, not a flood. PRAGMA and
+ * EXPLAIN are left alone; a query that already limits itself is trusted. */
+function applyRowCap(sql, cap) {
+  const stripped = stripSqlNoise(sql);
+  if (stripped === null) return { sql, capped: false };
+  const kw = firstKeywordOf(stripped);
+  if (kw !== 'select' && kw !== 'with') return { sql, capped: false };
+  if (/\blimit\b/i.test(stripped)) return { sql, capped: false };
+  const trimmed = String(sql).replace(/[\s;]+$/, '');
+  return { sql: trimmed + ' LIMIT ' + Math.max(1, Math.floor(cap)), capped: true };
+}
+
+/* ------------------------------------------------------- result shaping -- */
+
+/* `sqlite3 -json` prints an array of objects, or nothing at all for zero
+ * rows. Key order follows column order, which JSON.parse preserves. */
+function cliTable(stdout) {
+  const text = String(stdout || '').trim();
+  if (text === '') return { columns: [], rows: [] };
+  const parsed = JSON.parse(text);
+  if (!Array.isArray(parsed) || parsed.length === 0) return { columns: [], rows: [] };
+  const columns = Object.keys(parsed[0]);
+  return { columns, rows: parsed.map((o) => columns.map((c) => o[c])) };
+}
+
+/* sql.js `exec` returns [{ columns, values }], or [] for zero rows. */
+function wasmTable(result) {
+  if (!Array.isArray(result) || result.length === 0) return { columns: [], rows: [] };
+  return { columns: result[0].columns.slice(), rows: result[0].values.map((r) => r.slice()) };
+}
+
+function toCsv(columns, rows) {
+  const cell = (v) => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+  };
+  const lines = [columns.map(cell).join(',')];
+  for (const row of rows) lines.push(row.map(cell).join(','));
+  return lines.join('\r\n') + '\r\n';
+}
+
+/* ------------------------------------------------------- query building -- */
+
+function quoteIdent(name) { return '"' + String(name).replace(/"/g, '""') + '"'; }
+
+function quoteLiteral(value) { return "'" + String(value).replace(/'/g, "''") + "'"; }
+
+/* A per-column text filter becomes a LIKE over the text form of the value,
+ * with the member's %, _ and \ treated as plain characters. */
+function filterClause(column, text) {
+  const pattern = '%' + String(text).replace(/[\\%_]/g, (m) => '\\' + m) + '%';
+  return 'CAST(' + quoteIdent(column) + ' AS TEXT) LIKE ' + quoteLiteral(pattern) + " ESCAPE '\\'";
+}
+
+function whereOf(filters) {
+  const parts = [];
+  for (const [col, text] of Object.entries(filters || {})) {
+    if (text !== '' && text !== null && text !== undefined) parts.push(filterClause(col, text));
+  }
+  return parts.length ? ' WHERE ' + parts.join(' AND ') : '';
+}
+
+function buildBrowseQuery(table, { filters, sortCol, sortDir, limit, offset } = {}) {
+  let sql = 'SELECT * FROM ' + quoteIdent(table) + whereOf(filters);
+  if (sortCol) sql += ' ORDER BY ' + quoteIdent(sortCol) + (sortDir === 'desc' ? ' DESC' : ' ASC');
+  sql += ' LIMIT ' + Math.max(1, Math.floor(limit || 50));
+  sql += ' OFFSET ' + Math.max(0, Math.floor(offset || 0));
+  return sql;
+}
+
+function buildCountQuery(table, { filters } = {}) {
+  return 'SELECT COUNT(*) AS n FROM ' + quoteIdent(table) + whereOf(filters);
+}
+
+/* -------------------------------------------------- the database index -- */
+
+function isSidecarPath(path) { return SIDECAR_RE.test(path); }
+
+function isDbPath(path) {
+  if (isSidecarPath(path)) return false;
+  return DB_EXTS.has(extOf(path));
+}
+
+function isSkippedPath(path) {
+  return String(path).split('/').some((seg) => SKIP_FOLDERS.has(seg));
+}
+
+/* Every database in the vault, from a list of { path, size }. Sidecars and
+ * the folders nobody means (.obsidian, .git, .trash) stay out. */
+function findDatabases(files) {
+  return files
+    .filter((f) => isDbPath(f.path) && !isSkippedPath(f.path))
+    .sort((a, b) => a.path.localeCompare(b.path));
+}
+
+/* ---------------------------------------------------- dashboard specs -- */
+
+/* A dashboard is a JSON file: { id, title, database, tiles: [...] }. Each
+ * tile: { title, sql, viz: line|bar|stat|table, x, y, unit?, stack? }.
+ * `y` is one column name or a list of them. Every tile's SQL passes the
+ * statement gate at parse time, before it is ever run. */
+function parseDashboardSpec(text) {
+  let raw;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    return { ok: false, reason: 'This file is not valid JSON. ' + e.message };
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, reason: 'A dashboard file must be a JSON object.' };
+  }
+  if (typeof raw.id !== 'string' || !/^[a-z0-9][a-z0-9-]*$/i.test(raw.id)) {
+    return { ok: false, reason: 'The dashboard needs an "id": lowercase letters, digits and hyphens.' };
+  }
+  if (typeof raw.title !== 'string' || !raw.title.trim()) {
+    return { ok: false, reason: 'The dashboard needs a "title".' };
+  }
+  if (typeof raw.database !== 'string' || !raw.database.trim()) {
+    return { ok: false, reason: 'The dashboard needs a "database": a vault path like "07 Data/example.db".' };
+  }
+  if (!Array.isArray(raw.tiles) || raw.tiles.length === 0) {
+    return { ok: false, reason: 'The dashboard needs at least one tile in "tiles".' };
+  }
+  const tiles = [];
+  for (let i = 0; i < raw.tiles.length; i++) {
+    const t = raw.tiles[i];
+    const at = 'Tile ' + (i + 1);
+    if (!t || typeof t !== 'object') return { ok: false, reason: at + ' must be a JSON object.' };
+    if (typeof t.sql !== 'string' || !t.sql.trim()) return { ok: false, reason: at + ' needs an "sql" query.' };
+    const gate = gateStatement(t.sql);
+    if (!gate.ok) return { ok: false, reason: at + ': ' + gate.reason };
+    if (!VIZ_KINDS.has(t.viz)) return { ok: false, reason: at + ' needs a "viz" of line, bar, stat or table.' };
+    const y = Array.isArray(t.y) ? t.y.slice() : (typeof t.y === 'string' && t.y ? [t.y] : []);
+    if (y.some((c) => typeof c !== 'string' || !c)) return { ok: false, reason: at + ': every "y" entry must be a column name.' };
+    if ((t.viz === 'line' || t.viz === 'bar')) {
+      if (typeof t.x !== 'string' || !t.x) return { ok: false, reason: at + ' needs an "x" column for a ' + t.viz + ' chart.' };
+      if (y.length === 0) return { ok: false, reason: at + ' needs a "y" column for a ' + t.viz + ' chart.' };
+    }
+    tiles.push({
+      title: typeof t.title === 'string' ? t.title : '',
+      sql: t.sql,
+      viz: t.viz,
+      x: typeof t.x === 'string' ? t.x : '',
+      y,
+      unit: typeof t.unit === 'string' ? t.unit : '',
+      stack: t.stack === true,
+    });
+  }
+  return { ok: true, spec: { id: raw.id, title: raw.title.trim(), database: normalizePath(raw.database.trim()), tiles } };
+}
+
+/* Where a dashboard's computed results live in the vault, so Obsidian Sync
+ * carries them to devices that cannot open the database itself. */
+function cachePathFor(cacheFolder, dbPath, dashboardId) {
+  return normalizePath(cacheFolder + '/' + stemOf(dbPath) + '/' + dashboardId + '.json');
+}
+
+/* ---------------------------------------------------- migration planning -- */
+
+/* Plan the "Move databases into 07 Data" button: every database outside the
+ * data folder moves to its top level, sidecars travel with their database,
+ * nothing is ever overwritten. Pure: takes paths, returns the plan. */
+function planMigration(dbPaths, existingPaths, targetRoot) {
+  const root = normalizePath(targetRoot || '07 Data');
+  const moves = [];
+  const skips = [];
+  const claimed = new Set();
+  for (const from of dbPaths) {
+    if (from === root || from.startsWith(root + '/')) {
+      skips.push({ path: from, reason: 'already inside ' + root });
+      continue;
+    }
+    const to = root + '/' + baseName(from);
+    if (existingPaths.has(to) || claimed.has(to)) {
+      skips.push({ path: from, reason: 'a file named ' + baseName(from) + ' already exists in ' + root });
+      continue;
+    }
+    claimed.add(to);
+    const sidecars = [];
+    for (const suffix of ['-wal', '-shm']) {
+      if (existingPaths.has(from + suffix)) sidecars.push({ from: from + suffix, to: to + suffix });
+    }
+    moves.push({ from, to, sidecars });
+  }
+  return { moves, skips, targetRoot: root };
+}
+
+/* ---------------------------------------------------------- chart math -- */
+
+/* A pleasant axis: round step sizes, ticks that land on round numbers. */
+function niceScale(lo, hi, maxTicks) {
+  let min = Number(lo);
+  let max = Number(hi);
+  if (!Number.isFinite(min)) min = 0;
+  if (!Number.isFinite(max)) max = 0;
+  if (min > max) { const t = min; min = max; max = t; }
+  if (min === max) { max = min === 0 ? 1 : min + Math.abs(min) * 0.1; }
+  const span = max - min;
+  const count = Math.max(2, maxTicks || 5);
+  const rough = span / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(rough)));
+  let step = mag;
+  for (const m of [1, 2, 2.5, 5, 10]) {
+    if (mag * m >= rough) { step = mag * m; break; }
+  }
+  const start = Math.floor(min / step) * step;
+  const end = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = start; v <= end + step / 1e6; v += step) ticks.push(Math.round(v * 1e9) / 1e9);
+  return { min: start, max: end, step, ticks };
+}
+
+/* Stacked bar segments: for each row, each series' [base, top]. Negative
+ * values are clamped to zero rather than drawn downward; a stacked chart of
+ * hours or counts has no meaningful negative direction. */
+function stackRows(rows, seriesIdx) {
+  return rows.map((row) => {
+    let base = 0;
+    return seriesIdx.map((i) => {
+      const v = Math.max(0, Number(row[i]) || 0);
+      const seg = [base, base + v];
+      base += v;
+      return seg;
+    });
+  });
+}
+
+function columnIndex(columns, name) { return columns.indexOf(name); }
+
+/* The value a stat tile shows: the named y column of the first row, or the
+ * first column when no y is named. The next column, if any, is the caption. */
+function statOf(table, tile) {
+  if (!table.rows.length) return { value: null, caption: '' };
+  const row = table.rows[0];
+  const yName = tile.y && tile.y.length ? tile.y[0] : table.columns[0];
+  const yIdx = Math.max(0, columnIndex(table.columns, yName));
+  const captionIdx = table.columns.findIndex((c, i) => i !== yIdx);
+  return { value: row[yIdx], caption: captionIdx >= 0 ? String(row[captionIdx] === null ? '' : row[captionIdx]) : '' };
+}
+
+/* ========================================================================
+ * 2. THE ENGINES
+ * ====================================================================== */
+
+/* Every Node handle the desktop engine needs, gathered in one place behind
+ * the platform check, so the module loads clean on a phone and the gates
+ * can hand in fakes. */
+function makeDesktopDeps() {
+  if (!Platform.isDesktopApp) return null;
+  return {
+    childProcess: require('child_process'),
+    pathx: require('path'),
+  };
+}
+
+/* SQLite accepts a file: URI; percent, question mark and hash are the only
+ * characters that would change its meaning, so only those are encoded. */
+function dbFileUri(absPath) {
+  return 'file:' + String(absPath).replace(/[%?#]/g, (c) => '%' + c.charCodeAt(0).toString(16).padStart(2, '0')) + '?mode=ro';
+}
+
+function detectCli(deps, bin) {
+  return new Promise((resolve) => {
+    let done = false;
+    try {
+      deps.childProcess.execFile(bin || 'sqlite3', ['--version'], { timeout: 5000 }, (err, stdout) => {
+        if (done) return;
+        done = true;
+        if (err) resolve({ ok: false, reason: 'The sqlite3 command line tool was not found.' });
+        else resolve({ ok: true, version: String(stdout).trim().split(' ')[0] });
+      });
+    } catch (e) {
+      if (!done) { done = true; resolve({ ok: false, reason: 'The sqlite3 command line tool was not found.' }); }
+    }
+  });
+}
+
+/* ENGINE A: one sqlite3 process per query. The SQL is an argument, never a
+ * shell string. Read-only twice over: the -readonly flag and mode=ro in the
+ * URI. A query that runs too long is killed, and says so in plain words. */
+function cliQuery(deps, { bin, absPath, sql, timeoutMs, maxBuffer }) {
+  return new Promise((resolve, reject) => {
+    const args = ['-readonly', '-json', dbFileUri(absPath), sql];
+    deps.childProcess.execFile(
+      bin || 'sqlite3',
+      args,
+      { timeout: timeoutMs || 30000, maxBuffer: maxBuffer || CLI_MAX_BUFFER, killSignal: 'SIGKILL', windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          if (err.killed) {
+            reject(new Error('The query was stopped after ' + Math.round((timeoutMs || 30000) / 1000) + ' seconds. Narrow it down, for example with a date range or a LIMIT.'));
+            return;
+          }
+          const detail = String(stderr || err.message || '').trim().replace(/^Error:\s*/i, '');
+          reject(new Error(detail || 'The query failed.'));
+          return;
+        }
+        try {
+          resolve(cliTable(stdout));
+        } catch (e) {
+          reject(new Error('The result could not be read as JSON. ' + e.message));
+        }
+      }
+    );
+  });
+}
+
+/* ENGINE B: sql.js. The whole database file is loaded into memory, so the
+ * caller checks the size cap first. The wasm module loads once per session;
+ * an open database is kept until the file on disk changes. */
+class WasmEngine {
+  constructor(plugin) {
+    this.plugin = plugin;
+    this.SQL = null;
+    this.open = new Map(); /* dbPath -> { db, mtime, size } */
+  }
+
+  async init() {
+    if (this.SQL) return;
+    const adapter = this.plugin.app.vault.adapter;
+    const dir = this.plugin.manifest.dir;
+    const jsText = await adapter.read(dir + '/sql-wasm.js');
+    const wasmBinary = await adapter.readBinary(dir + '/sql-wasm.wasm');
+    const mod = { exports: {} };
+    /* sql-wasm.js is a UMD build: given a `module` it exports initSqlJs.
+     * `require`, `__dirname` and `__filename` ride along for its Node
+     * branch (Electron computes them eagerly even though the wasm arrives
+     * as bytes); a plain web view detects the web and never asks. */
+    new Function('module', 'exports', 'require', '__dirname', '__filename', jsText)(
+      mod, mod.exports, typeof require === 'function' ? require : undefined, '/', '/sql-wasm.js'
+    );
+    const initSqlJs = mod.exports;
+    if (typeof initSqlJs !== 'function') throw new Error('The bundled sql-wasm.js did not load.');
+    this.SQL = await initSqlJs({ wasmBinary: new Uint8Array(wasmBinary) });
+  }
+
+  async database(dbPath) {
+    const adapter = this.plugin.app.vault.adapter;
+    const stat = await adapter.stat(dbPath);
+    if (!stat) throw new Error('The database file was not found at ' + dbPath + '.');
+    const cached = this.open.get(dbPath);
+    if (cached && cached.mtime === stat.mtime && cached.size === stat.size) return cached.db;
+    if (cached) { try { cached.db.close(); } catch (e) { /* already gone */ } this.open.delete(dbPath); }
+    await this.init();
+    const bytes = await adapter.readBinary(dbPath);
+    const db = new this.SQL.Database(new Uint8Array(bytes));
+    this.open.set(dbPath, { db, mtime: stat.mtime, size: stat.size });
+    return db;
+  }
+
+  async query(dbPath, sql) {
+    const db = await this.database(dbPath);
+    return wasmTable(db.exec(sql));
+  }
+
+  closeAll() {
+    for (const { db } of this.open.values()) { try { db.close(); } catch (e) { /* already gone */ } }
+    this.open.clear();
+  }
+}
+
+/* The one place a query happens. Gate first, cap second, engine third. */
+class QueryService {
+  constructor(plugin, deps) {
+    this.plugin = plugin;
+    this.deps = deps === undefined ? makeDesktopDeps() : deps;
+    this.cli = null; /* { ok, version | reason } after detect() */
+    this.wasm = new WasmEngine(plugin);
+  }
+
+  async detect() {
+    if (!this.deps) { this.cli = { ok: false, reason: 'Not on a desktop.' }; return this.cli; }
+    this.cli = await detectCli(this.deps, this.plugin.settings.sqlite3Path || 'sqlite3');
+    return this.cli;
+  }
+
+  cliReady() { return !!(this.deps && this.cli && this.cli.ok); }
+
+  /* Which engine answers for this database, or a plain reason why none can. */
+  async engineFor(dbPath) {
+    const adapter = this.plugin.app.vault.adapter;
+    const stat = await adapter.stat(dbPath);
+    if (!stat) return { engine: null, reason: 'The database file was not found at ' + dbPath + '.' };
+    if (this.cliReady()) return { engine: 'cli', size: stat.size };
+    const capBytes = this.plugin.settings.mobileCapMb * MB;
+    if (stat.size <= capBytes) return { engine: 'wasm', size: stat.size };
+    const where = this.deps
+      ? 'The sqlite3 command line tool was not found, and this database is too big to load into memory'
+      : 'This database is too big to load into memory on this device';
+    return {
+      engine: null,
+      size: stat.size,
+      reason: where + ' (' + formatBytes(stat.size) + ', the cap is ' + this.plugin.settings.mobileCapMb + ' MB). Dashboards for it still work from the desktop cache.',
+    };
+  }
+
+  absPathOf(dbPath) {
+    const adapter = this.plugin.app.vault.adapter;
+    if (typeof adapter.getBasePath !== 'function') throw new Error('No file system path on this device.');
+    return this.deps.pathx.join(adapter.getBasePath(), ...dbPath.split('/'));
+  }
+
+  /* Run one read-only statement. `cap` adds a LIMIT to an uncapped SELECT;
+   * pass 0 to trust the query (the browser builds its own LIMIT). */
+  async query(dbPath, sql, { cap } = {}) {
+    const gate = gateStatement(sql);
+    if (!gate.ok) throw new Error(gate.reason);
+    let finalSql = sql;
+    let capped = false;
+    if (cap) {
+      const r = applyRowCap(sql, cap);
+      finalSql = r.sql;
+      capped = r.capped;
+    }
+    const choice = await this.engineFor(dbPath);
+    if (!choice.engine) throw new Error(choice.reason);
+    const t0 = Date.now();
+    let table;
+    if (choice.engine === 'cli') {
+      table = await cliQuery(this.deps, {
+        bin: this.plugin.settings.sqlite3Path || 'sqlite3',
+        absPath: this.absPathOf(dbPath),
+        sql: finalSql,
+        timeoutMs: this.plugin.settings.queryTimeoutSec * 1000,
+      });
+    } else {
+      table = await this.wasm.query(dbPath, finalSql);
+    }
+    return { columns: table.columns, rows: table.rows, ms: Date.now() - t0, engine: choice.engine, capped };
+  }
+}
+
+/* Move the databases a migration plan names, through the vault adapter,
+ * never overwriting. Injected adapter = testable with a fake. */
+async function executeMigration(adapter, plan) {
+  const results = [];
+  await ensureFolder(adapter, plan.targetRoot);
+  for (const move of plan.moves) {
+    if (!(await adapter.exists(move.from))) {
+      results.push({ from: move.from, to: move.to, ok: false, reason: 'the file is gone' });
+      continue;
+    }
+    if (await adapter.exists(move.to)) {
+      results.push({ from: move.from, to: move.to, ok: false, reason: 'a file already exists at ' + move.to });
+      continue;
+    }
+    await adapter.rename(move.from, move.to);
+    for (const side of move.sidecars) {
+      if ((await adapter.exists(side.from)) && !(await adapter.exists(side.to))) {
+        await adapter.rename(side.from, side.to);
+      }
+    }
+    results.push({ from: move.from, to: move.to, ok: true });
+  }
+  return results;
+}
+
+async function ensureFolder(adapter, folder) {
+  const parts = normalizePath(folder).split('/');
+  let path = '';
+  for (const part of parts) {
+    path = path ? path + '/' + part : part;
+    if (!(await adapter.exists(path))) await adapter.mkdir(path);
+  }
+}
+
+/* ========================================================================
+ * 3. THE OBSIDIAN SURFACE
+ * ====================================================================== */
+
+/* ------------------------------------------------------------- charts -- */
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+function svgEl(tag, attrs) {
+  const el = document.createElementNS(SVG_NS, tag);
+  for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, String(v));
+  return el;
+}
+
+const CHART_W = 640;
+const CHART_H = 260;
+const PAD = { top: 14, right: 14, bottom: 34, left: 52 };
+
+function chartFrame(parentEl) {
+  const svg = svgEl('svg', { viewBox: '0 0 ' + CHART_W + ' ' + CHART_H, class: 'icor-sqlv-chart', role: 'img' });
+  parentEl.appendChild(svg);
+  return svg;
+}
+
+function drawAxes(svg, scale, xLabels) {
+  const plotW = CHART_W - PAD.left - PAD.right;
+  const plotH = CHART_H - PAD.top - PAD.bottom;
+  for (const tick of scale.ticks) {
+    const y = PAD.top + plotH - ((tick - scale.min) / (scale.max - scale.min)) * plotH;
+    svg.appendChild(svgEl('line', { x1: PAD.left, y1: y, x2: PAD.left + plotW, y2: y, class: 'icor-sqlv-gridline' }));
+    const label = svgEl('text', { x: PAD.left - 6, y: y + 3, 'text-anchor': 'end', class: 'icor-sqlv-tick' });
+    label.textContent = formatNumber(tick);
+    svg.appendChild(label);
+  }
+  const n = xLabels.length;
+  if (n > 0) {
+    const every = Math.max(1, Math.ceil(n / 7));
+    for (let i = 0; i < n; i += every) {
+      const x = PAD.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+      const label = svgEl('text', { x, y: CHART_H - PAD.bottom + 16, 'text-anchor': 'middle', class: 'icor-sqlv-tick' });
+      label.textContent = shortXLabel(xLabels[i]);
+      svg.appendChild(label);
+    }
+  }
+  return { plotW, plotH };
+}
+
+function shortXLabel(v) {
+  const s = String(v === null || v === undefined ? '' : v);
+  return /^\d{4}-\d{2}-\d{2}$/.test(s) ? s.slice(5) : (s.length > 10 ? s.slice(0, 10) : s);
+}
+
+function legendFor(parentEl, names) {
+  if (names.length < 2) return;
+  const legend = parentEl.createDiv({ cls: 'icor-sqlv-legend' });
+  names.forEach((name, i) => {
+    const item = legend.createSpan({ cls: 'icor-sqlv-legend-item' });
+    const chip = item.createSpan({ cls: 'icor-sqlv-legend-chip' });
+    chip.style.background = SERIES_COLORS[i % SERIES_COLORS.length];
+    item.createSpan({ text: name });
+  });
+}
+
+function renderLineChart(parentEl, table, tile) {
+  const xIdx = columnIndex(table.columns, tile.x);
+  const seriesNames = tile.y.filter((c) => columnIndex(table.columns, c) >= 0);
+  const seriesIdx = seriesNames.map((c) => columnIndex(table.columns, c));
+  if (xIdx < 0 || seriesIdx.length === 0 || table.rows.length === 0) {
+    parentEl.createDiv({ cls: 'icor-sqlv-empty', text: 'No rows to draw.' });
+    return;
+  }
+  const values = [];
+  for (const row of table.rows) for (const i of seriesIdx) { const v = Number(row[i]); if (Number.isFinite(v)) values.push(v); }
+  /* A snug axis: a heart rate line living between 60 and 90 should use the
+   * whole plot, not hover above an empty run down to zero. */
+  const scale = niceScale(Math.min(...values), Math.max(...values), 5);
+  const svg = chartFrame(parentEl);
+  const xLabels = table.rows.map((r) => r[xIdx]);
+  const { plotW, plotH } = drawAxes(svg, scale, xLabels);
+  const n = table.rows.length;
+  const xOf = (i) => PAD.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
+  const yOf = (v) => PAD.top + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
+
+  seriesIdx.forEach((colIdx, s) => {
+    let d = '';
+    table.rows.forEach((row, i) => {
+      const v = Number(row[colIdx]);
+      if (!Number.isFinite(v)) return;
+      d += (d ? ' L ' : 'M ') + xOf(i).toFixed(1) + ' ' + yOf(v).toFixed(1);
+    });
+    if (!d) return;
+    const path = svgEl('path', { d, fill: 'none', 'stroke-width': 1.8, 'stroke-linejoin': 'round' });
+    path.setAttribute('stroke', SERIES_COLORS[s % SERIES_COLORS.length]);
+    svg.appendChild(path);
+  });
+
+  /* Hover: a guide line plus the values of the nearest x, in one readout. */
+  const guide = svgEl('line', { y1: PAD.top, y2: PAD.top + plotH, class: 'icor-sqlv-guide', visibility: 'hidden' });
+  const readout = svgEl('text', { y: PAD.top + 2, class: 'icor-sqlv-readout', visibility: 'hidden' });
+  const dots = seriesIdx.map((colIdx, s) => {
+    const dot = svgEl('circle', { r: 3, visibility: 'hidden' });
+    dot.setAttribute('fill', SERIES_COLORS[s % SERIES_COLORS.length]);
+    svg.appendChild(dot);
+    return dot;
+  });
+  svg.appendChild(guide);
+  svg.appendChild(readout);
+  const hover = svgEl('rect', { x: PAD.left, y: PAD.top, width: plotW, height: plotH, fill: 'transparent' });
+  svg.appendChild(hover);
+  hover.addEventListener('mousemove', (ev) => {
+    const rect = svg.getBoundingClientRect();
+    const px = ((ev.clientX - rect.left) / rect.width) * CHART_W;
+    const i = Math.max(0, Math.min(n - 1, Math.round(((px - PAD.left) / plotW) * (n - 1))));
+    const x = xOf(i);
+    guide.setAttribute('x1', x); guide.setAttribute('x2', x); guide.setAttribute('visibility', 'visible');
+    const parts = [String(xLabels[i])];
+    seriesIdx.forEach((colIdx, s) => {
+      const v = Number(table.rows[i][colIdx]);
+      if (Number.isFinite(v)) {
+        parts.push(seriesNames[s] + ' ' + formatNumber(v) + (tile.unit ? ' ' + tile.unit : ''));
+        dots[s].setAttribute('cx', x); dots[s].setAttribute('cy', yOf(v)); dots[s].setAttribute('visibility', 'visible');
+      } else {
+        dots[s].setAttribute('visibility', 'hidden');
+      }
+    });
+    readout.textContent = parts.join('  ·  ');
+    readout.setAttribute('x', x > CHART_W / 2 ? x - 6 : x + 6);
+    readout.setAttribute('text-anchor', x > CHART_W / 2 ? 'end' : 'start');
+    readout.setAttribute('visibility', 'visible');
+  });
+  hover.addEventListener('mouseleave', () => {
+    guide.setAttribute('visibility', 'hidden');
+    readout.setAttribute('visibility', 'hidden');
+    for (const dot of dots) dot.setAttribute('visibility', 'hidden');
+  });
+  legendFor(parentEl, seriesNames);
+}
+
+function renderBarChart(parentEl, table, tile) {
+  const xIdx = columnIndex(table.columns, tile.x);
+  const seriesNames = tile.y.filter((c) => columnIndex(table.columns, c) >= 0);
+  const seriesIdx = seriesNames.map((c) => columnIndex(table.columns, c));
+  if (xIdx < 0 || seriesIdx.length === 0 || table.rows.length === 0) {
+    parentEl.createDiv({ cls: 'icor-sqlv-empty', text: 'No rows to draw.' });
+    return;
+  }
+  const stacked = tile.stack && seriesIdx.length > 1;
+  let top = 0;
+  if (stacked) {
+    for (const segs of stackRows(table.rows, seriesIdx)) top = Math.max(top, segs[segs.length - 1][1]);
+  } else {
+    for (const row of table.rows) for (const i of seriesIdx) top = Math.max(top, Number(row[i]) || 0);
+  }
+  const scale = niceScale(0, top, 5);
+  const svg = chartFrame(parentEl);
+  const xLabels = table.rows.map((r) => r[xIdx]);
+  const { plotW, plotH } = drawAxes(svg, scale, xLabels);
+  const n = table.rows.length;
+  const slot = plotW / n;
+  const gap = Math.min(4, slot * 0.2);
+  const yOf = (v) => PAD.top + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
+  const titleOf = (rowI, s, v) =>
+    String(xLabels[rowI]) + ' · ' + seriesNames[s] + ' ' + formatNumber(v) + (tile.unit ? ' ' + tile.unit : '');
+
+  if (stacked) {
+    const stacks = stackRows(table.rows, seriesIdx);
+    stacks.forEach((segs, rowI) => {
+      const x = PAD.left + rowI * slot + gap / 2;
+      segs.forEach(([lo, hi], s) => {
+        if (hi <= lo) return;
+        const bar = svgEl('rect', { x: x.toFixed(1), y: yOf(hi).toFixed(1), width: Math.max(1, slot - gap).toFixed(1), height: Math.max(0.5, yOf(lo) - yOf(hi)).toFixed(1) });
+        bar.setAttribute('fill', SERIES_COLORS[s % SERIES_COLORS.length]);
+        const t = svgEl('title', {});
+        t.textContent = titleOf(rowI, s, hi - lo);
+        bar.appendChild(t);
+        svg.appendChild(bar);
+      });
+    });
+  } else {
+    const inner = Math.max(1, (slot - gap) / seriesIdx.length);
+    table.rows.forEach((row, rowI) => {
+      seriesIdx.forEach((colIdx, s) => {
+        const v = Number(row[colIdx]) || 0;
+        if (v <= 0) return;
+        const x = PAD.left + rowI * slot + gap / 2 + s * inner;
+        const bar = svgEl('rect', { x: x.toFixed(1), y: yOf(v).toFixed(1), width: inner.toFixed(1), height: Math.max(0.5, yOf(0) - yOf(v)).toFixed(1) });
+        bar.setAttribute('fill', SERIES_COLORS[s % SERIES_COLORS.length]);
+        const t = svgEl('title', {});
+        t.textContent = titleOf(rowI, s, v);
+        bar.appendChild(t);
+        svg.appendChild(bar);
+      });
+    });
+  }
+  legendFor(parentEl, seriesNames);
+}
+
+function renderStatTile(parentEl, table, tile) {
+  const { value, caption } = statOf(table, tile);
+  const wrap = parentEl.createDiv({ cls: 'icor-sqlv-stat' });
+  if (value === null || value === undefined) {
+    wrap.createDiv({ cls: 'icor-sqlv-stat-value', text: 'no data' });
+    return;
+  }
+  const line = wrap.createDiv({ cls: 'icor-sqlv-stat-value' });
+  line.createSpan({ text: formatNumber(typeof value === 'string' ? value : Number(value)) });
+  if (tile.unit) line.createSpan({ cls: 'icor-sqlv-stat-unit', text: ' ' + tile.unit });
+  if (caption) wrap.createDiv({ cls: 'icor-sqlv-stat-caption', text: caption });
+}
+
+function renderResultTable(parentEl, table, { maxRows } = {}) {
+  const cap = maxRows || 200;
+  const scroller = parentEl.createDiv({ cls: 'icor-sqlv-table-scroll' });
+  const t = scroller.createEl('table', { cls: 'icor-sqlv-table' });
+  const head = t.createEl('thead').createEl('tr');
+  for (const col of table.columns) head.createEl('th', { text: col });
+  const body = t.createEl('tbody');
+  for (const row of table.rows.slice(0, cap)) {
+    const tr = body.createEl('tr');
+    row.forEach((v, i) => {
+      const td = tr.createEl('td', { text: v === null || v === undefined ? '' : String(v) });
+      if (typeof v === 'number') td.addClass('icor-sqlv-num');
+    });
+  }
+  if (table.rows.length > cap) {
+    parentEl.createDiv({ cls: 'icor-sqlv-note', text: 'Showing the first ' + cap + ' of ' + table.rows.length + ' rows.' });
+  }
+  return scroller;
+}
+
+function renderTile(tileEl, tileSpec, table) {
+  if (tileSpec.title) tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
+  const body = tileEl.createDiv({ cls: 'icor-sqlv-tile-body' });
+  if (tileSpec.viz === 'stat') renderStatTile(body, table, tileSpec);
+  else if (tileSpec.viz === 'line') renderLineChart(body, table, tileSpec);
+  else if (tileSpec.viz === 'bar') renderBarChart(body, table, tileSpec);
+  else renderResultTable(body, table, { maxRows: 50 });
+}
+
+/* ---------------------------------------------------- the browser view -- */
+
+class SqliteBrowserView extends FileView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.allowNoFile = true;
+    this.navigation = true;
+    this.dbPath = null;
+    this.tables = [];
+    this.counts = new Map();
+    this.active = null;
+    this.tab = 'data';
+    this.page = 0;
+    this.sortCol = null;
+    this.sortDir = 'asc';
+    this.filters = {};
+    this.consoleSql = '';
+    this.consoleResult = null;
+    this.engineInfo = null;
+  }
+
+  getViewType() { return VIEW_BROWSER; }
+  getIcon() { return 'database'; }
+  getDisplayText() { return this.file ? this.file.name : 'SQLite browser'; }
+  canAcceptExtension(ext) { return DB_EXTS.has(String(ext).toLowerCase()); }
+
+  async onLoadFile(file) {
+    await this.setDatabase(file.path);
+  }
+
+  async onUnloadFile() {
+    this.dbPath = null;
+    this.tables = [];
+    this.counts.clear();
+    this.active = null;
+  }
+
+  async setDatabase(dbPath) {
+    this.dbPath = dbPath;
+    this.tables = [];
+    this.counts.clear();
+    this.active = null;
+    this.page = 0;
+    this.sortCol = null;
+    this.filters = {};
+    this.consoleResult = null;
+    this.engineInfo = await this.plugin.query.engineFor(dbPath);
+    if (this.engineInfo.engine) {
+      try {
+        const res = await this.plugin.query.query(dbPath,
+          "SELECT name, type FROM sqlite_master WHERE type IN ('table','view') AND name NOT LIKE 'sqlite_%' ORDER BY type, name");
+        this.tables = res.rows.map(([name, type]) => ({ name, type }));
+        if (this.tables.length) this.active = this.tables[0].name;
+      } catch (e) {
+        this.engineInfo = { engine: null, reason: e.message };
+      }
+    }
+    this.render();
+    this.fillCounts();
+  }
+
+  async fillCounts() {
+    const dbPath = this.dbPath;
+    for (const t of this.tables) {
+      if (this.dbPath !== dbPath) return;
+      if (this.counts.has(t.name)) continue;
+      try {
+        const res = await this.plugin.query.query(dbPath, buildCountQuery(t.name));
+        this.counts.set(t.name, res.rows.length ? Number(res.rows[0][0]) : 0);
+      } catch (e) {
+        this.counts.set(t.name, null);
+      }
+      this.renderRailCounts();
+    }
+  }
+
+  async onOpen() {
+    this.render();
+  }
+
+  render() {
+    const root = this.contentEl;
+    root.empty();
+    root.addClass('icor-sqlv-root');
+
+    if (!this.dbPath) {
+      const empty = root.createDiv({ cls: 'icor-sqlv-blank' });
+      empty.createDiv({ text: 'Open a database to browse it.' });
+      const btn = empty.createEl('button', { text: 'List the databases in this vault' });
+      btn.addEventListener('click', () => new DatabaseIndexModal(this.plugin, (path) => this.openDb(path)).open());
+      return;
+    }
+
+    const header = root.createDiv({ cls: 'icor-sqlv-header' });
+    header.createSpan({ cls: 'icor-sqlv-header-name', text: baseName(this.dbPath) });
+    const sub = [];
+    if (this.engineInfo && this.engineInfo.size !== undefined) sub.push(formatBytes(this.engineInfo.size));
+    if (this.engineInfo && this.engineInfo.engine === 'cli') sub.push('read-only, sqlite3');
+    if (this.engineInfo && this.engineInfo.engine === 'wasm') sub.push('read-only, in memory');
+    header.createSpan({ cls: 'icor-sqlv-header-sub', text: sub.join(' · ') });
+
+    if (!this.engineInfo || !this.engineInfo.engine) {
+      root.createDiv({ cls: 'icor-sqlv-error', text: (this.engineInfo && this.engineInfo.reason) || 'This database cannot be opened here.' });
+      return;
+    }
+
+    const split = root.createDiv({ cls: 'icor-sqlv-split' });
+    this.railEl = split.createDiv({ cls: 'icor-sqlv-rail' });
+    this.mainEl = split.createDiv({ cls: 'icor-sqlv-main' });
+    this.renderRail();
+    this.renderMain();
+  }
+
+  renderRail() {
+    const rail = this.railEl;
+    rail.empty();
+    rail.createDiv({ cls: 'icor-sqlv-rail-heading', text: 'Tables' });
+    this.rowEls = new Map();
+    for (const t of this.tables) {
+      const row = rail.createDiv({ cls: 'icor-sqlv-rail-row' + (t.name === this.active ? ' is-active' : '') });
+      row.createSpan({ cls: 'icor-sqlv-rail-name', text: t.name + (t.type === 'view' ? ' (view)' : '') });
+      const count = row.createSpan({ cls: 'icor-sqlv-rail-count', text: this.countLabel(t.name) });
+      this.rowEls.set(t.name, count);
+      row.addEventListener('click', () => {
+        this.active = t.name;
+        this.page = 0;
+        this.sortCol = null;
+        this.filters = {};
+        this.renderRail();
+        this.renderMain();
+      });
+    }
+    if (!this.tables.length) rail.createDiv({ cls: 'icor-sqlv-note', text: 'No tables.' });
+
+    rail.createDiv({ cls: 'icor-sqlv-rail-heading', text: 'Databases in this vault' });
+    for (const db of this.plugin.vaultDatabases()) {
+      const row = rail.createDiv({ cls: 'icor-sqlv-rail-row' + (db.path === this.dbPath ? ' is-active' : '') });
+      row.createSpan({ cls: 'icor-sqlv-rail-name', text: db.path });
+      row.createSpan({ cls: 'icor-sqlv-rail-count', text: formatBytes(db.size) });
+      if (db.path !== this.dbPath) row.addEventListener('click', () => this.openDb(db.path));
+    }
+  }
+
+  countLabel(name) {
+    if (!this.counts.has(name)) return '…';
+    const n = this.counts.get(name);
+    return n === null ? '?' : formatNumber(n);
+  }
+
+  renderRailCounts() {
+    if (!this.rowEls) return;
+    for (const [name, el] of this.rowEls) el.setText(this.countLabel(name));
+  }
+
+  async openDb(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (file instanceof TFile) await this.leaf.openFile(file);
+    else await this.setDatabase(path);
+  }
+
+  renderMain() {
+    const main = this.mainEl;
+    main.empty();
+    const tabs = main.createDiv({ cls: 'icor-sqlv-tabs' });
+    for (const [id, label] of [['data', 'Data'], ['schema', 'Schema'], ['sql', 'SQL console']]) {
+      const b = tabs.createEl('button', { text: label, cls: this.tab === id ? 'is-active' : '' });
+      b.addEventListener('click', () => { this.tab = id; this.renderMain(); });
+    }
+    this.bodyEl = main.createDiv({ cls: 'icor-sqlv-body' });
+    if (this.tab === 'data') this.renderData();
+    else if (this.tab === 'schema') this.renderSchema();
+    else this.renderConsole();
+  }
+
+  async renderData() {
+    const body = this.bodyEl;
+    body.empty();
+    if (!this.active) { body.createDiv({ cls: 'icor-sqlv-note', text: 'No table selected.' }); return; }
+    const pageSize = this.plugin.settings.pageSize;
+    const sql = buildBrowseQuery(this.active, {
+      filters: this.filters, sortCol: this.sortCol, sortDir: this.sortDir,
+      limit: pageSize, offset: this.page * pageSize,
+    });
+    let res;
+    try {
+      res = await this.plugin.query.query(this.dbPath, sql);
+    } catch (e) {
+      body.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+      return;
+    }
+    if (this.tab !== 'data') return;
+    body.empty();
+
+    const scroller = body.createDiv({ cls: 'icor-sqlv-table-scroll icor-sqlv-grow' });
+    const t = scroller.createEl('table', { cls: 'icor-sqlv-table' });
+    const thead = t.createEl('thead');
+    const headRow = thead.createEl('tr');
+    for (const col of res.columns) {
+      const th = headRow.createEl('th');
+      const btn = th.createEl('button', { cls: 'icor-sqlv-sort', text: col });
+      if (this.sortCol === col) btn.createSpan({ text: this.sortDir === 'asc' ? ' ↑' : ' ↓' });
+      btn.setAttribute('aria-label', 'Sort by ' + col);
+      btn.addEventListener('click', () => {
+        if (this.sortCol === col) this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
+        else { this.sortCol = col; this.sortDir = 'asc'; }
+        this.page = 0;
+        this.renderData();
+      });
+    }
+    const filterRow = thead.createEl('tr', { cls: 'icor-sqlv-filter-row' });
+    for (const col of res.columns) {
+      const th = filterRow.createEl('th');
+      const input = th.createEl('input', { type: 'text', cls: 'icor-sqlv-filter', value: this.filters[col] || '' });
+      input.setAttribute('placeholder', 'filter');
+      input.setAttribute('aria-label', 'Filter ' + col);
+      input.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Enter') {
+          this.filters[col] = input.value.trim();
+          this.page = 0;
+          this.renderData();
+        }
+      });
+    }
+    const tbody = t.createEl('tbody');
+    for (const row of res.rows) {
+      const tr = tbody.createEl('tr');
+      row.forEach((v) => {
+        const td = tr.createEl('td', { text: v === null || v === undefined ? '' : String(v) });
+        if (typeof v === 'number') td.addClass('icor-sqlv-num');
+      });
+    }
+    if (!res.rows.length) body.createDiv({ cls: 'icor-sqlv-note', text: 'No rows match.' });
+
+    const pager = body.createDiv({ cls: 'icor-sqlv-pager' });
+    const prev = pager.createEl('button', { text: 'Previous' });
+    prev.disabled = this.page === 0;
+    prev.addEventListener('click', () => { this.page = Math.max(0, this.page - 1); this.renderData(); });
+    const info = pager.createSpan({ cls: 'icor-sqlv-pager-info', text: 'Rows ' + (this.page * pageSize + 1) + ' to ' + (this.page * pageSize + res.rows.length) });
+    const next = pager.createEl('button', { text: 'Next' });
+    next.disabled = res.rows.length < pageSize;
+    next.addEventListener('click', () => { this.page += 1; this.renderData(); });
+    if (Object.values(this.filters).some((v) => v)) {
+      const clear = pager.createEl('button', { text: 'Clear filters' });
+      clear.addEventListener('click', () => { this.filters = {}; this.page = 0; this.renderData(); });
+    }
+    /* Total, filled in when the count comes back. */
+    this.plugin.query.query(this.dbPath, buildCountQuery(this.active, { filters: this.filters }))
+      .then((c) => {
+        if (this.tab !== 'data' || !c.rows.length) return;
+        info.setText('Rows ' + (this.page * pageSize + (res.rows.length ? 1 : 0)) + ' to ' + (this.page * pageSize + res.rows.length) + ' of ' + formatNumber(Number(c.rows[0][0])));
+      })
+      .catch(() => { /* the page already shows without a total */ });
+  }
+
+  async renderSchema() {
+    const body = this.bodyEl;
+    body.empty();
+    if (!this.active) { body.createDiv({ cls: 'icor-sqlv-note', text: 'No table selected.' }); return; }
+    try {
+      const cols = await this.plugin.query.query(this.dbPath, 'PRAGMA table_info(' + quoteIdent(this.active) + ')');
+      body.createDiv({ cls: 'icor-sqlv-section-title', text: 'Columns of ' + this.active });
+      renderResultTable(body, cols, { maxRows: 500 });
+      const idx = await this.plugin.query.query(this.dbPath, 'PRAGMA index_list(' + quoteIdent(this.active) + ')');
+      if (idx.rows.length) {
+        body.createDiv({ cls: 'icor-sqlv-section-title', text: 'Indexes' });
+        const nameIdx = columnIndex(idx.columns, 'name');
+        const uniqueIdx = columnIndex(idx.columns, 'unique');
+        const listing = { columns: ['index', 'columns', 'unique'], rows: [] };
+        for (const row of idx.rows) {
+          const indexName = row[nameIdx];
+          const info = await this.plugin.query.query(this.dbPath, 'PRAGMA index_info(' + quoteIdent(indexName) + ')');
+          const colNameIdx = columnIndex(info.columns, 'name');
+          listing.rows.push([indexName, info.rows.map((r) => r[colNameIdx]).join(', '), row[uniqueIdx] ? 'yes' : 'no']);
+        }
+        renderResultTable(body, listing, { maxRows: 200 });
+      }
+    } catch (e) {
+      body.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+    }
+  }
+
+  renderConsole() {
+    const body = this.bodyEl;
+    body.empty();
+    const intro = body.createDiv({ cls: 'icor-sqlv-note' });
+    intro.setText('Read-only SQL. One statement, starting with SELECT, WITH, PRAGMA or EXPLAIN. A SELECT with no LIMIT gets one of ' + this.plugin.settings.rowCap + ' rows.');
+    const area = body.createEl('textarea', { cls: 'icor-sqlv-console' });
+    area.value = this.consoleSql;
+    area.setAttribute('rows', '5');
+    area.setAttribute('placeholder', "SELECT * FROM " + (this.active ? quoteIdent(this.active) : 'my_table') + ' LIMIT 20');
+    area.setAttribute('aria-label', 'SQL query');
+    const bar = body.createDiv({ cls: 'icor-sqlv-console-bar' });
+    const run = bar.createEl('button', { text: 'Run', cls: 'mod-cta' });
+    const hint = bar.createSpan({ cls: 'icor-sqlv-note', text: Platform.isMacOS ? 'Cmd+Enter runs it' : 'Ctrl+Enter runs it' });
+    const out = body.createDiv({ cls: 'icor-sqlv-console-out icor-sqlv-grow' });
+
+    const execute = async () => {
+      this.consoleSql = area.value;
+      out.empty();
+      run.disabled = true;
+      try {
+        const res = await this.plugin.query.query(this.dbPath, area.value, { cap: this.plugin.settings.rowCap });
+        this.consoleResult = res;
+        const meta = out.createDiv({ cls: 'icor-sqlv-console-meta' });
+        meta.createSpan({ text: formatNumber(res.rows.length) + (res.rows.length === 1 ? ' row' : ' rows') + ' in ' + res.ms + ' ms' + (res.capped ? ', capped at ' + this.plugin.settings.rowCap : '') });
+        const copy = meta.createEl('button', { text: 'Copy as CSV' });
+        copy.addEventListener('click', async () => {
+          await navigator.clipboard.writeText(toCsv(res.columns, res.rows));
+          new Notice('Copied ' + res.rows.length + ' rows as CSV.');
+        });
+        renderResultTable(out, res, { maxRows: this.plugin.settings.rowCap });
+      } catch (e) {
+        this.consoleResult = null;
+        out.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+      }
+      run.disabled = false;
+    };
+    run.addEventListener('click', execute);
+    area.addEventListener('keydown', (ev) => {
+      if ((ev.metaKey || ev.ctrlKey) && ev.key === 'Enter') { ev.preventDefault(); execute(); }
+    });
+    if (this.consoleResult) {
+      const res = this.consoleResult;
+      const meta = out.createDiv({ cls: 'icor-sqlv-console-meta' });
+      meta.createSpan({ text: formatNumber(res.rows.length) + (res.rows.length === 1 ? ' row' : ' rows') + ' in ' + res.ms + ' ms' });
+      renderResultTable(out, res, { maxRows: this.plugin.settings.rowCap });
+    }
+  }
+}
+
+/* -------------------------------------------------- the dashboards view -- */
+
+class SqliteDashboardsView extends ItemView {
+  constructor(leaf, plugin) {
+    super(leaf);
+    this.plugin = plugin;
+    this.navigation = true;
+    this.specs = [];
+    this.errors = [];
+    this.activeId = null;
+  }
+
+  getViewType() { return VIEW_DASHBOARDS; }
+  getIcon() { return 'bar-chart-3'; }
+  getDisplayText() { return 'Dashboards'; }
+
+  async onOpen() {
+    await this.reload();
+  }
+
+  async reload() {
+    const { specs, errors } = await this.plugin.loadDashboardSpecs();
+    this.specs = specs;
+    this.errors = errors;
+    if (!this.activeId || !this.specs.some((s) => s.id === this.activeId)) {
+      this.activeId = this.specs.length ? this.specs[0].id : null;
+    }
+    this.render();
+  }
+
+  render() {
+    const root = this.contentEl;
+    root.empty();
+    root.addClass('icor-sqlv-root');
+    const bar = root.createDiv({ cls: 'icor-sqlv-dash-bar' });
+    if (this.specs.length) {
+      const select = bar.createEl('select', { cls: 'dropdown' });
+      for (const spec of this.specs) {
+        const opt = select.createEl('option', { text: spec.title });
+        opt.value = spec.id;
+        if (spec.id === this.activeId) opt.selected = true;
+      }
+      select.addEventListener('change', () => { this.activeId = select.value; this.render(); });
+    }
+    const refresh = bar.createEl('button', { text: 'Refresh' });
+    refresh.addEventListener('click', () => this.reload());
+
+    for (const err of this.errors) {
+      root.createDiv({ cls: 'icor-sqlv-error', text: err.path + ': ' + err.reason });
+    }
+    if (!this.specs.length) {
+      root.createDiv({ cls: 'icor-sqlv-note', text: 'No dashboards found in ' + this.plugin.settings.dashboardFolder + '. The folder has a README that explains the file format.' });
+      return;
+    }
+    const spec = this.specs.find((s) => s.id === this.activeId);
+    if (spec) this.renderDashboard(root, spec);
+  }
+
+  async renderDashboard(root, spec) {
+    const host = root.createDiv({ cls: 'icor-sqlv-dash' });
+    const status = host.createDiv({ cls: 'icor-sqlv-note' });
+    const grid = host.createDiv({ cls: 'icor-sqlv-grid' });
+    const choice = await this.plugin.query.engineFor(spec.database);
+
+    if (choice.engine) {
+      status.setText('Live from ' + spec.database);
+      const cachedTiles = [];
+      let allOk = true;
+      for (const tile of spec.tiles) {
+        const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
+        try {
+          const res = await this.plugin.query.query(spec.database, tile.sql, { cap: 5000 });
+          renderTile(tileEl, tile, res);
+          cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows }));
+        } catch (e) {
+          allOk = false;
+          if (tile.title) tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tile.title });
+          tileEl.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+        }
+      }
+      /* The cache the phone will render from. Only a fully healthy run is
+       * worth freezing; a half-broken one would overwrite a good cache. */
+      if (allOk && Platform.isDesktopApp) {
+        try {
+          await this.plugin.writeDashboardCache(spec, cachedTiles);
+        } catch (e) {
+          status.setText('Live from ' + spec.database + '. The cache could not be written: ' + e.message);
+        }
+      }
+      return;
+    }
+
+    /* No engine for this database here: render from the desktop cache. */
+    const cache = await this.plugin.readDashboardCache(spec);
+    if (!cache) {
+      status.setText((choice.reason || 'This database cannot be opened here.') + ' No cached results yet. Open this dashboard once on the desktop and sync.');
+      return;
+    }
+    status.setText('Computed on desktop, ' + relativeTime(cache.computedAt) + '. ' + (choice.reason || ''));
+    for (const tile of cache.tiles) {
+      const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
+      renderTile(tileEl, tile, { columns: tile.columns, rows: tile.rows });
+    }
+  }
+}
+
+/* --------------------------------------------------- the index modal -- */
+
+class DatabaseIndexModal extends Modal {
+  constructor(plugin, onPick) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.onPick = onPick || null;
+  }
+
+  onOpen() {
+    this.titleEl.setText('Databases in this vault');
+    const { contentEl } = this;
+    contentEl.empty();
+    const dbs = this.plugin.vaultDatabases();
+    if (!dbs.length) {
+      contentEl.createDiv({ text: 'No SQLite databases found. Files ending in .db, .sqlite or .sqlite3 would be listed here.' });
+      return;
+    }
+    const list = contentEl.createDiv({ cls: 'icor-sqlv-index' });
+    for (const db of dbs) {
+      const row = list.createDiv({ cls: 'icor-sqlv-index-row' });
+      const label = row.createDiv({ cls: 'icor-sqlv-index-path' });
+      label.createSpan({ text: baseName(db.path) });
+      label.createDiv({ cls: 'icor-sqlv-index-folder', text: db.path });
+      row.createSpan({ cls: 'icor-sqlv-index-size', text: formatBytes(db.size) });
+      row.addEventListener('click', async () => {
+        this.close();
+        if (this.onPick) this.onPick(db.path);
+        else await this.plugin.openBrowserFor(db.path);
+      });
+    }
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ------------------------------------------------- the migration modal -- */
+
+class MigrationModal extends Modal {
+  constructor(plugin, plan) {
+    super(plugin.app);
+    this.plugin = plugin;
+    this.plan = plan;
+  }
+
+  onOpen() {
+    this.titleEl.setText('Move databases into ' + this.plan.targetRoot);
+    const { contentEl } = this;
+    contentEl.empty();
+
+    if (!this.plan.moves.length) {
+      contentEl.createDiv({ text: 'Nothing to move. Every database is already inside ' + this.plan.targetRoot + ', or its name is already taken there.' });
+      for (const skip of this.plan.skips) {
+        contentEl.createDiv({ cls: 'icor-sqlv-note', text: skip.path + ': ' + skip.reason });
+      }
+      return;
+    }
+
+    contentEl.createDiv({ text: 'These files would move. Nothing is copied, deleted or changed; the files are only moved.' });
+    const list = contentEl.createDiv({ cls: 'icor-sqlv-move-list' });
+    for (const move of this.plan.moves) {
+      const row = list.createDiv({ cls: 'icor-sqlv-move-row' });
+      row.createDiv({ text: move.from + '  →  ' + move.to });
+      for (const side of move.sidecars) {
+        row.createDiv({ cls: 'icor-sqlv-note', text: side.from + '  →  ' + side.to + '  (moves with its database)' });
+      }
+    }
+    for (const skip of this.plan.skips) {
+      contentEl.createDiv({ cls: 'icor-sqlv-note', text: 'Stays put: ' + skip.path + ' (' + skip.reason + ')' });
+    }
+    const warn = contentEl.createDiv({ cls: 'icor-sqlv-warn' });
+    warn.createDiv({ text: 'Moving changes where the databases live. Tools outside Obsidian that connect to them may need the new path. No data is lost or modified.' });
+    warn.createDiv({ text: 'Close other apps that are using a database before moving it.' });
+
+    const bar = contentEl.createDiv({ cls: 'icor-sqlv-console-bar' });
+    const go = bar.createEl('button', { text: 'Move ' + this.plan.moves.length + (this.plan.moves.length === 1 ? ' database' : ' databases'), cls: 'mod-cta' });
+    const cancel = bar.createEl('button', { text: 'Cancel' });
+    cancel.addEventListener('click', () => this.close());
+    go.addEventListener('click', async () => {
+      go.disabled = true;
+      const results = await executeMigration(this.plugin.app.vault.adapter, this.plan);
+      contentEl.empty();
+      this.titleEl.setText('Done');
+      const moved = results.filter((r) => r.ok);
+      const skipped = results.filter((r) => !r.ok);
+      contentEl.createDiv({ text: moved.length + (moved.length === 1 ? ' database moved.' : ' databases moved.') });
+      for (const r of moved) contentEl.createDiv({ cls: 'icor-sqlv-note', text: r.from + '  →  ' + r.to });
+      for (const r of skipped) contentEl.createDiv({ cls: 'icor-sqlv-note', text: 'Skipped ' + r.from + ': ' + r.reason });
+      const closeBtn = contentEl.createEl('button', { text: 'Close' });
+      closeBtn.addEventListener('click', () => this.close());
+    });
+  }
+
+  onClose() { this.contentEl.empty(); }
+}
+
+/* ------------------------------------------------------- the settings -- */
+
+class SqliteViewerSettingTab extends PluginSettingTab {
+  constructor(app, plugin) {
+    super(app, plugin);
+    this.plugin = plugin;
+  }
+
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+
+    const engineLine = () => {
+      if (!Platform.isDesktopApp) return 'On this device the plugin reads databases with its built-in engine, up to the size cap below.';
+      const cli = this.plugin.query.cli;
+      if (cli && cli.ok) return 'The sqlite3 command line tool was found (version ' + cli.version + '). Big databases work at full speed.';
+      return 'The sqlite3 command line tool was not found. Databases up to the size cap below still work with the built-in engine. On macOS sqlite3 ships with the system; set the path below if it lives somewhere unusual.';
+    };
+    containerEl.createDiv({ cls: 'icor-sqlv-note', text: engineLine() });
+
+    new Setting(containerEl)
+      .setName('Rows per page')
+      .setDesc('How many rows the data browser shows at a time.')
+      .addText((t) => t.setValue(String(this.plugin.settings.pageSize)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 5 && n <= 1000) { this.plugin.settings.pageSize = n; await this.plugin.saveSettings(); }
+      }));
+
+    new Setting(containerEl)
+      .setName('Size cap for the built-in engine (MB)')
+      .setDesc('The built-in engine loads the whole database file into memory. Files over this cap are not loaded; their dashboards render from the desktop cache instead.')
+      .addText((t) => t.setValue(String(this.plugin.settings.mobileCapMb)).onChange(async (v) => {
+        const n = parseInt(v, 10);
+        if (Number.isFinite(n) && n >= 1 && n <= 4000) { this.plugin.settings.mobileCapMb = n; await this.plugin.saveSettings(); }
+      }));
+
+    new Setting(containerEl)
+      .setName('Dashboards folder')
+      .setDesc('Where dashboard files live. Each dashboard is one JSON file.')
+      .addText((t) => t.setValue(this.plugin.settings.dashboardFolder).onChange(async (v) => {
+        this.plugin.settings.dashboardFolder = normalizePath(v || DEFAULT_SETTINGS.dashboardFolder);
+        await this.plugin.saveSettings();
+      }));
+
+    new Setting(containerEl)
+      .setName('Dashboard cache folder')
+      .setDesc('Where computed dashboard results are stored so phones and tablets can show them without opening the database.')
+      .addText((t) => t.setValue(this.plugin.settings.cacheFolder).onChange(async (v) => {
+        this.plugin.settings.cacheFolder = normalizePath(v || DEFAULT_SETTINGS.cacheFolder);
+        await this.plugin.saveSettings();
+      }));
+
+    if (Platform.isDesktopApp) {
+      new Setting(containerEl)
+        .setName('Path to sqlite3')
+        .setDesc('Leave empty to use the system sqlite3. Set a full path if yours lives somewhere unusual.')
+        .addText((t) => t.setValue(this.plugin.settings.sqlite3Path).onChange(async (v) => {
+          this.plugin.settings.sqlite3Path = v.trim();
+          await this.plugin.saveSettings();
+          await this.plugin.query.detect();
+        }));
+
+      new Setting(containerEl)
+        .setName('Query timeout (seconds)')
+        .setDesc('A query that runs longer than this is stopped.')
+        .addText((t) => t.setValue(String(this.plugin.settings.queryTimeoutSec)).onChange(async (v) => {
+          const n = parseInt(v, 10);
+          if (Number.isFinite(n) && n >= 1 && n <= 600) { this.plugin.settings.queryTimeoutSec = n; await this.plugin.saveSettings(); }
+        }));
+    }
+
+    new Setting(containerEl).setName('Tidy up').setHeading();
+    new Setting(containerEl)
+      .setName('Move databases into ' + this.plugin.settings.dataFolder)
+      .setDesc('Finds every database outside ' + this.plugin.settings.dataFolder + ' and offers to move it there, together with any -wal and -shm files that belong to it. You see the exact list first, and nothing moves until you confirm.')
+      .addButton((b) => b.setButtonText('Review and move').onClick(() => {
+        const dbs = this.plugin.vaultDatabases();
+        const existing = new Set(this.app.vault.getFiles().map((f) => f.path));
+        const plan = planMigration(dbs.map((d) => d.path), existing, this.plugin.settings.dataFolder);
+        new MigrationModal(this.plugin, plan).open();
+      }));
+  }
+}
+
+/* ------------------------------------------------- the starter content -- */
+
+const DASHBOARD_README = `---
+title: Dashboards
+doc_type: note
+status: active
+tags:
+  - sqlite
+  - dashboards
+---
+
+# Dashboards
+
+Each JSON file in this folder is one dashboard for the ICOR for Life - SQLite
+Viewer plugin. Open them with the "SQLite Viewer: Open dashboards" command or
+the chart icon in the ribbon.
+
+## The file format
+
+\`\`\`json
+{
+  "id": "my-dashboard",
+  "title": "My Dashboard",
+  "database": "07 Data/example.db",
+  "tiles": [
+    {
+      "title": "Rows per day",
+      "sql": "SELECT day, COUNT(*) AS rows FROM things GROUP BY day ORDER BY day",
+      "viz": "line",
+      "x": "day",
+      "y": "rows",
+      "unit": "rows"
+    }
+  ]
+}
+\`\`\`
+
+- \`id\`: lowercase letters, digits and hyphens. Also names the cache file.
+- \`database\`: the path of the database inside the vault.
+- \`viz\`: \`line\`, \`bar\`, \`stat\` (one big number) or \`table\`.
+- \`x\` and \`y\`: column names from the query. \`y\` may be a list of
+  columns for a multi-series chart.
+- \`unit\`: shown next to values, for example "kg" or "steps".
+- \`stack\`: set to \`true\` on a bar tile to stack its series.
+
+Only read queries run: one statement, starting with SELECT, WITH, PRAGMA or
+EXPLAIN. The plugin never writes to a database.
+
+## Phones and tablets
+
+When a dashboard renders on the desktop, its results are saved under the
+cache folder and synced like any note. A device that cannot open the
+database itself shows the cached results, with a line saying when they were
+computed. Small databases render live everywhere.
+`;
+
+const STARTER_DASHBOARDS = [
+  {
+    file: 'health-overview.json',
+    spec: {
+      id: 'health-overview',
+      title: 'Health Overview',
+      database: '07 Data/mypka-health.db',
+      tiles: [
+        {
+          title: 'Latest body weight',
+          viz: 'stat',
+          unit: 'kg',
+          y: 'weight_kg',
+          sql: "SELECT ROUND(qty, 1) AS weight_kg, local_date FROM health_metric WHERE metric_name = 'weight_body_mass' ORDER BY local_date DESC, recorded_at_utc DESC LIMIT 1",
+        },
+        {
+          title: 'Daily steps, last 90 days',
+          viz: 'bar',
+          x: 'local_date',
+          y: 'steps',
+          unit: 'steps',
+          sql: "SELECT local_date, CAST(SUM(qty) AS INTEGER) AS steps FROM health_metric WHERE metric_name = 'step_count' AND local_date >= date((SELECT MAX(local_date) FROM health_metric WHERE metric_name = 'step_count'), '-90 day') GROUP BY local_date ORDER BY local_date",
+        },
+        {
+          title: 'Heart rate, last 90 days',
+          viz: 'line',
+          x: 'local_date',
+          y: ['resting', 'average'],
+          unit: 'bpm',
+          sql: "SELECT h.local_date AS local_date, (SELECT ROUND(AVG(m.qty), 1) FROM health_metric m WHERE m.metric_name = 'resting_heart_rate' AND m.local_date = h.local_date) AS resting, ROUND(AVG(h.hr_avg), 1) AS average FROM health_heart_rate h WHERE h.local_date >= date((SELECT MAX(local_date) FROM health_heart_rate), '-90 day') GROUP BY h.local_date ORDER BY h.local_date",
+        },
+        {
+          title: 'Sleep by stage, last 30 days',
+          viz: 'bar',
+          stack: true,
+          x: 'local_date',
+          y: ['deep', 'core', 'rem', 'awake'],
+          unit: 'hours',
+          sql: "SELECT local_date, ROUND(deep_hr, 2) AS deep, ROUND(core_hr, 2) AS core, ROUND(rem_hr, 2) AS rem, ROUND(awake_hr, 2) AS awake FROM health_sleep WHERE local_date >= date((SELECT MAX(local_date) FROM health_sleep), '-30 day') ORDER BY local_date",
+        },
+        {
+          title: 'Workout minutes per week, last 12 weeks',
+          viz: 'bar',
+          x: 'week',
+          y: 'minutes',
+          unit: 'min',
+          sql: "SELECT strftime('%Y-W%W', local_date) AS week, CAST(SUM(duration_sec) / 60 AS INTEGER) AS minutes FROM health_workout WHERE local_date >= date((SELECT MAX(local_date) FROM health_workout), '-84 day') GROUP BY week ORDER BY week",
+        },
+        {
+          title: 'Workout energy per week, last 12 weeks',
+          viz: 'bar',
+          x: 'week',
+          y: 'kcal',
+          unit: 'kcal',
+          sql: "SELECT strftime('%Y-W%W', local_date) AS week, CAST(SUM(active_energy_kcal) AS INTEGER) AS kcal FROM health_workout WHERE local_date >= date((SELECT MAX(local_date) FROM health_workout), '-84 day') GROUP BY week ORDER BY week",
+        },
+      ],
+    },
+  },
+  {
+    file: 'engagement-overview.json',
+    spec: {
+      id: 'engagement-overview',
+      title: 'Engagement Overview',
+      database: '07 Data/engagement.db',
+      tiles: [
+        {
+          title: 'Recommendations',
+          viz: 'stat',
+          y: 'total',
+          sql: 'SELECT COUNT(*) AS total FROM engagement_posts',
+        },
+        {
+          title: 'Posted',
+          viz: 'stat',
+          y: 'posted',
+          sql: "SELECT COUNT(*) AS posted FROM engagement_posts WHERE status = 'posted'",
+        },
+        {
+          title: 'Posted and skipped per day',
+          viz: 'bar',
+          stack: true,
+          x: 'batch_id',
+          y: ['posted', 'skipped', 'open'],
+          sql: "SELECT batch_id, SUM(status = 'posted') AS posted, SUM(status = 'skipped') AS skipped, SUM(status = 'recommended') AS open FROM engagement_posts GROUP BY batch_id ORDER BY batch_id",
+        },
+        {
+          title: 'By platform',
+          viz: 'table',
+          sql: "SELECT platform, COUNT(*) AS recommended, SUM(status = 'posted') AS posted, SUM(status = 'skipped') AS skipped FROM engagement_posts GROUP BY platform ORDER BY platform",
+        },
+      ],
+    },
+  },
+  {
+    file: 'youtube-overview.json',
+    spec: {
+      id: 'youtube-overview',
+      title: 'YouTube Overview',
+      database: '06 AI Team/AI Team Knowledge/Data/youtube-analytics.db',
+      tiles: [
+        {
+          title: 'Views, latest window',
+          viz: 'stat',
+          y: 'views',
+          sql: "SELECT views, period_start || ' to ' || period_end AS window FROM yt_channel_snapshots ORDER BY period_end DESC LIMIT 1",
+        },
+        {
+          title: 'Net subscribers, latest window',
+          viz: 'stat',
+          y: 'net_subscribers',
+          sql: 'SELECT subscribers_gained - subscribers_lost AS net_subscribers, period_start || \' to \' || period_end AS window FROM yt_channel_snapshots ORDER BY period_end DESC LIMIT 1',
+        },
+        {
+          title: 'Views per snapshot window',
+          viz: 'line',
+          x: 'period_end',
+          y: ['views'],
+          sql: 'SELECT period_end, views FROM yt_channel_snapshots ORDER BY period_end',
+        },
+        {
+          title: 'Top videos, latest snapshot',
+          viz: 'table',
+          sql: 'SELECT title, views, ROUND(avg_view_percentage, 1) AS avg_view_pct, likes, comments FROM yt_video_snapshots WHERE snapshot_date = (SELECT MAX(snapshot_date) FROM yt_video_snapshots) ORDER BY views DESC LIMIT 10',
+        },
+      ],
+    },
+  },
+];
+
+/* ------------------------------------------------------- the plugin -- */
+
+class IcorSqliteViewerPlugin extends Plugin {
+  async onload() {
+    await this.loadSettings();
+    this.query = new QueryService(this);
+    this.query.detect();
+
+    this.registerView(VIEW_BROWSER, (leaf) => new SqliteBrowserView(leaf, this));
+    this.registerView(VIEW_DASHBOARDS, (leaf) => new SqliteDashboardsView(leaf, this));
+    try {
+      this.registerExtensions(['db', 'sqlite', 'sqlite3'], VIEW_BROWSER);
+    } catch (e) {
+      new Notice('Another plugin already opens .db files. Use the "SQLite Viewer: List databases" command instead.');
+    }
+
+    this.addRibbonIcon('bar-chart-3', 'Open dashboards', () => this.openDashboards());
+
+    this.addCommand({ id: 'open-dashboards', name: 'Open dashboards', callback: () => this.openDashboards() });
+    this.addCommand({ id: 'list-databases', name: 'List databases', callback: () => new DatabaseIndexModal(this).open() });
+    this.addCommand({ id: 'open-browser', name: 'Open database browser', callback: () => this.openBrowserFor(null) });
+
+    this.addSettingTab(new SqliteViewerSettingTab(this.app, this));
+
+    /* Starter dashboards and the folder README, written once, only when
+     * missing. The one write besides the dashboard cache. */
+    this.app.workspace.onLayoutReady(() => { this.ensureStarterFiles().catch(() => {}); });
+  }
+
+  onunload() {
+    if (this.query && this.query.wasm) this.query.wasm.closeAll();
+  }
+
+  async loadSettings() {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  async saveSettings() {
+    await this.saveData(this.settings);
+  }
+
+  vaultDatabases() {
+    return findDatabases(this.app.vault.getFiles().map((f) => ({ path: f.path, size: f.stat.size })));
+  }
+
+  async openBrowserFor(dbPath) {
+    const leaf = this.app.workspace.getLeaf(true);
+    if (dbPath) {
+      const file = this.app.vault.getAbstractFileByPath(dbPath);
+      if (file instanceof TFile) { await leaf.openFile(file); return; }
+    }
+    await leaf.setViewState({ type: VIEW_BROWSER, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  async openDashboards() {
+    const existing = this.app.workspace.getLeavesOfType(VIEW_DASHBOARDS);
+    if (existing.length) {
+      this.app.workspace.revealLeaf(existing[0]);
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf(true);
+    await leaf.setViewState({ type: VIEW_DASHBOARDS, active: true });
+    this.app.workspace.revealLeaf(leaf);
+  }
+
+  async loadDashboardSpecs() {
+    const adapter = this.app.vault.adapter;
+    const folder = this.settings.dashboardFolder;
+    const specs = [];
+    const errors = [];
+    if (!(await adapter.exists(folder))) return { specs, errors };
+    const listing = await adapter.list(folder);
+    for (const path of listing.files.sort()) {
+      if (!path.toLowerCase().endsWith('.json')) continue;
+      try {
+        const parsed = parseDashboardSpec(await adapter.read(path));
+        if (parsed.ok) specs.push(parsed.spec);
+        else errors.push({ path, reason: parsed.reason });
+      } catch (e) {
+        errors.push({ path, reason: e.message });
+      }
+    }
+    return { specs, errors };
+  }
+
+  async writeDashboardCache(spec, tiles) {
+    const adapter = this.app.vault.adapter;
+    const path = cachePathFor(this.settings.cacheFolder, spec.database, spec.id);
+    const folder = path.slice(0, path.lastIndexOf('/'));
+    await ensureFolder(adapter, folder);
+    const payload = {
+      dashboardId: spec.id,
+      title: spec.title,
+      database: spec.database,
+      computedAt: new Date().toISOString(),
+      tiles,
+    };
+    await adapter.write(path, JSON.stringify(payload, null, 2));
+  }
+
+  async readDashboardCache(spec) {
+    const adapter = this.app.vault.adapter;
+    const path = cachePathFor(this.settings.cacheFolder, spec.database, spec.id);
+    if (!(await adapter.exists(path))) return null;
+    try {
+      const cache = JSON.parse(await adapter.read(path));
+      if (!cache || !Array.isArray(cache.tiles) || typeof cache.computedAt !== 'string') return null;
+      return cache;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async ensureStarterFiles() {
+    const adapter = this.app.vault.adapter;
+    const folder = this.settings.dashboardFolder;
+    await ensureFolder(adapter, folder);
+    const readmePath = folder + '/README.md';
+    if (!(await adapter.exists(readmePath))) await adapter.write(readmePath, DASHBOARD_README);
+    for (const starter of STARTER_DASHBOARDS) {
+      const path = folder + '/' + starter.file;
+      if (!(await adapter.exists(path))) await adapter.write(path, JSON.stringify(starter.spec, null, 2) + '\n');
+    }
+  }
+}
+
+/* The pure library, exposed for the gates. */
+IcorSqliteViewerPlugin.lib = {
+  extOf, baseName, stemOf, formatBytes, formatNumber, relativeTime,
+  stripSqlNoise, gateStatement, applyRowCap,
+  cliTable, wasmTable, toCsv,
+  quoteIdent, quoteLiteral, filterClause, buildBrowseQuery, buildCountQuery,
+  isSidecarPath, isDbPath, isSkippedPath, findDatabases,
+  parseDashboardSpec, cachePathFor, planMigration,
+  niceScale, stackRows, statOf,
+  dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
+  STARTER_DASHBOARDS, DEFAULT_SETTINGS,
+};
+
+module.exports = IcorSqliteViewerPlugin;
