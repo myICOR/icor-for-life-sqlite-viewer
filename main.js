@@ -1134,9 +1134,12 @@ class SqliteBrowserView extends FileView {
     const headRow = thead.createEl('tr');
     for (const col of res.columns) {
       const th = headRow.createEl('th');
-      const btn = th.createEl('button', { cls: 'icor-sqlv-sort', text: col });
-      if (this.sortCol === col) btn.createSpan({ text: this.sortDir === 'asc' ? ' ↑' : ' ↓' });
+      const btn = th.createEl('button', { cls: 'icor-sqlv-sort' });
+      btn.createSpan({ cls: 'icor-sqlv-sort-label', text: col });
+      if (this.sortCol === col) btn.createSpan({ cls: 'icor-sqlv-sort-mark', text: this.sortDir === 'asc' ? '▴' : '▾' });
       btn.setAttribute('aria-label', 'Sort by ' + col);
+      /* The full name survives a narrow column. */
+      btn.setAttribute('title', col);
       btn.addEventListener('click', () => {
         if (this.sortCol === col) this.sortDir = this.sortDir === 'asc' ? 'desc' : 'asc';
         else { this.sortCol = col; this.sortDir = 'asc'; }
@@ -1282,17 +1285,42 @@ class SqliteDashboardsView extends ItemView {
   getDisplayText() { return 'Dashboards'; }
 
   async onOpen() {
-    await this.reload();
+    try {
+      await this.reload();
+    } catch (e) {
+      this.showFailure(e);
+    }
   }
 
   async reload() {
-    const { specs, errors } = await this.plugin.loadDashboardSpecs();
+    let { specs, errors } = await this.plugin.loadDashboardSpecs();
+    /* An empty folder heals itself: seed the starters (a write happens
+     * only for a file that is missing) and look again, so a view opened
+     * before the first seeding does not stay empty. */
+    if (!specs.length && !errors.length) {
+      try {
+        await this.plugin.ensureStarterFiles();
+        ({ specs, errors } = await this.plugin.loadDashboardSpecs());
+      } catch (e) {
+        errors = [{ path: this.plugin.settings.dashboardFolder, reason: e.message }];
+      }
+    }
     this.specs = specs;
     this.errors = errors;
     if (!this.activeId || !this.specs.some((s) => s.id === this.activeId)) {
       this.activeId = this.specs.length ? this.specs[0].id : null;
     }
     this.render();
+  }
+
+  /* A dashboard is never allowed to fail into a blank pane. Whatever went
+   * wrong is written into the view, in plain words plus the raw detail. */
+  showFailure(e, host) {
+    const el = (host || this.contentEl).createDiv({ cls: 'icor-sqlv-error' });
+    el.createDiv({ text: 'The dashboards could not be drawn. This is a plugin problem, not a data problem.' });
+    el.createDiv({ text: String((e && e.message) || e) });
+    if (e && e.stack) el.createDiv({ cls: 'icor-sqlv-error-detail', text: String(e.stack).split('\n').slice(0, 4).join('\n') });
+    console.error('ICOR SQLite Viewer: dashboards failed to render', e);
   }
 
   render() {
@@ -1320,40 +1348,57 @@ class SqliteDashboardsView extends ItemView {
       return;
     }
     const spec = this.specs.find((s) => s.id === this.activeId);
-    if (spec) this.renderDashboard(root, spec);
+    if (spec) {
+      /* Un-awaited on purpose so the frame paints first, but never allowed
+       * to fail silently: a rejection lands in the view as text. */
+      this.renderDashboard(root, spec).catch((e) => this.showFailure(e, root));
+    }
   }
 
   async renderDashboard(root, spec) {
     const host = root.createDiv({ cls: 'icor-sqlv-dash' });
     const status = host.createDiv({ cls: 'icor-sqlv-note' });
     const grid = host.createDiv({ cls: 'icor-sqlv-grid' });
+    try {
+      await this.renderDashboardInto(spec, status, grid);
+    } catch (e) {
+      this.showFailure(e, host);
+    }
+  }
+
+  async renderDashboardInto(spec, status, grid) {
     const choice = await this.plugin.query.engineFor(spec.database);
 
     if (choice.engine) {
-      status.setText('Live from ' + spec.database);
       const cachedTiles = [];
-      let allOk = true;
-      for (const tile of spec.tiles) {
+      let failed = 0;
+      const t0 = Date.now();
+      for (let i = 0; i < spec.tiles.length; i++) {
+        const tile = spec.tiles[i];
+        status.setText('Running query ' + (i + 1) + ' of ' + spec.tiles.length + (tile.title ? ': ' + tile.title : '') + ' …');
         const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
         try {
           const res = await this.plugin.query.query(spec.database, tile.sql, { cap: 5000 });
           renderTile(tileEl, tile, res);
           cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows }));
         } catch (e) {
-          allOk = false;
+          failed++;
           if (tile.title) tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tile.title });
           tileEl.createDiv({ cls: 'icor-sqlv-error', text: e.message });
         }
       }
+      let line = 'Live from ' + spec.database + ', ' + spec.tiles.length + (spec.tiles.length === 1 ? ' query' : ' queries') + ' in ' + (Date.now() - t0) + ' ms.';
+      if (failed) line = 'Live from ' + spec.database + '. ' + failed + ' of ' + spec.tiles.length + ' queries failed; the errors are shown in their tiles.';
       /* The cache the phone will render from. Only a fully healthy run is
        * worth freezing; a half-broken one would overwrite a good cache. */
-      if (allOk && Platform.isDesktopApp) {
+      if (!failed && Platform.isDesktopApp) {
         try {
           await this.plugin.writeDashboardCache(spec, cachedTiles);
         } catch (e) {
-          status.setText('Live from ' + spec.database + '. The cache could not be written: ' + e.message);
+          line += ' The cache could not be written: ' + e.message;
         }
       }
+      status.setText(line);
       return;
     }
 
@@ -1366,7 +1411,11 @@ class SqliteDashboardsView extends ItemView {
     status.setText('Computed on desktop, ' + relativeTime(cache.computedAt) + '. ' + (choice.reason || ''));
     for (const tile of cache.tiles) {
       const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') });
-      renderTile(tileEl, tile, { columns: tile.columns, rows: tile.rows });
+      try {
+        renderTile(tileEl, tile, { columns: tile.columns, rows: tile.rows });
+      } catch (e) {
+        tileEl.createDiv({ cls: 'icor-sqlv-error', text: e.message });
+      }
     }
   }
 }
@@ -1796,6 +1845,10 @@ class IcorSqliteViewerPlugin extends Plugin {
     const existing = this.app.workspace.getLeavesOfType(VIEW_DASHBOARDS);
     if (existing.length) {
       this.app.workspace.revealLeaf(existing[0]);
+      /* A revealed view re-reads the folder. Without this, a view that
+       * opened before the starter files existed stayed empty forever. */
+      const view = existing[0].view;
+      if (view && typeof view.reload === 'function') await view.reload();
       return;
     }
     const leaf = this.app.workspace.getLeaf(true);

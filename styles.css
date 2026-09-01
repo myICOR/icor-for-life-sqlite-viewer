@@ -154,11 +154,19 @@
   font-size: var(--font-ui-small);
 }
 
+/* Cells are flat. Every property a theme likes to decorate on generic
+ * table elements is set explicitly, so nothing leaks in. */
 .icor-sqlv-table th,
 .icor-sqlv-table td {
   padding: var(--size-2-1) var(--size-2-3);
+  margin: 0;
+  border: none;
   border-bottom: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
   text-align: left;
+  vertical-align: middle;
   white-space: nowrap;
   max-width: 32em;
   overflow: hidden;
@@ -169,33 +177,90 @@
   position: sticky;
   top: 0;
   background: var(--background-secondary);
+  border-bottom: 2px solid var(--background-modifier-border-hover, var(--background-modifier-border));
   z-index: 1;
 }
 
-.icor-sqlv-table tbody tr:hover { background: var(--background-modifier-hover); }
+.icor-sqlv-table tbody tr:hover td { background: var(--background-modifier-hover); }
 
 .icor-sqlv-num {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
 
-.icor-sqlv-sort {
-  background: none;
-  border: none;
-  box-shadow: none;
-  padding: 0;
-  font: inherit;
+/* The sort control is the whole header cell, but it must not look like a
+ * button: `all: unset` clears the theme's pill styling (background,
+ * border, radius, padding, shadow), then the few things it should have
+ * come back explicitly. */
+.icor-sqlv-table thead button.icor-sqlv-sort {
+  all: unset;
+  display: flex;
+  align-items: baseline;
+  gap: var(--size-2-1);
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  font-size: var(--font-ui-smaller);
   font-weight: var(--font-semibold);
-  color: var(--text-normal);
+  color: var(--text-muted);
   cursor: pointer;
+  overflow: hidden;
 }
 
-.icor-sqlv-filter-row th { padding: var(--size-2-1); }
+.icor-sqlv-table thead button.icor-sqlv-sort:hover { color: var(--text-normal); }
 
-.icor-sqlv-filter {
-  width: 100%;
-  min-width: 6em;
+.icor-sqlv-table thead button.icor-sqlv-sort:focus-visible {
+  outline: 2px solid var(--interactive-accent);
+  outline-offset: 1px;
+}
+
+.icor-sqlv-sort-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.icor-sqlv-sort-mark {
+  flex: 0 0 auto;
+  color: var(--interactive-accent);
   font-size: var(--font-ui-smaller);
+}
+
+/* The filter row stays quiet: no boxes, just a faint underline that wakes
+ * up on focus. `all: unset` again, so no theme pill survives. */
+.icor-sqlv-filter-row th {
+  position: static;
+  padding: 0 var(--size-2-3) var(--size-2-1);
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.icor-sqlv-table input.icor-sqlv-filter {
+  all: unset;
+  display: block;
+  width: 100%;
+  min-width: 5em;
+  box-sizing: border-box;
+  padding: 1px 0;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-normal);
+  border-bottom: 1px solid transparent;
+  cursor: text;
+}
+
+.icor-sqlv-table input.icor-sqlv-filter::placeholder {
+  color: var(--text-faint);
+  opacity: 0.6;
+}
+
+.icor-sqlv-table input.icor-sqlv-filter:hover {
+  border-bottom-color: var(--background-modifier-border);
+}
+
+.icor-sqlv-table input.icor-sqlv-filter:focus,
+.icor-sqlv-table input.icor-sqlv-filter:focus-visible {
+  outline: none;
+  border-bottom-color: var(--interactive-accent);
 }
 
 .icor-sqlv-pager {
@@ -373,6 +438,14 @@
   border: 1px solid var(--background-modifier-error);
   border-radius: var(--radius-s);
   overflow-wrap: anywhere;
+}
+
+.icor-sqlv-error-detail {
+  color: var(--text-muted);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  white-space: pre-wrap;
+  margin-top: var(--size-2-2);
 }
 
 .icor-sqlv-empty {

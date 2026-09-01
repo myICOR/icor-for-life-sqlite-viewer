@@ -86,7 +86,7 @@ export function makeObsidian({ desktop = true } = {}) {
       constructor(app, manifest) { super(); this.app = app; this.manifest = manifest; this.saved = null; }
       async loadData() { return this.saved === null ? null : JSON.parse(JSON.stringify(this.saved)); }
       async saveData(d) { this.saved = JSON.parse(JSON.stringify(d)); }
-      registerView() {}
+      registerView(type, factory) { (this.viewFactories || (this.viewFactories = {}))[type] = factory; }
       registerExtensions() {}
       addRibbonIcon() { return makeEl('div'); }
       addCommand(c) { (this.commands || (this.commands = [])).push(c); }
