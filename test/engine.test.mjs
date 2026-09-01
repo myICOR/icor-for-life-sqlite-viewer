@@ -190,15 +190,15 @@ test('the cache round-trips through the adapter, keyed by dashboard id, and a 0.
   const spec = { id: 'health-overview', title: 'Health', database: '07 Data/mypka-health.db', tiles: [] };
   const tiles = [{ title: 'T', viz: 'stat', x: '', y: ['n'], unit: '', stack: false, columns: ['n'], rows: [[42]] }];
   await plugin.writeDashboardCache(spec, tiles);
-  const path = '07 Data/Dashboard Cache/dashboards/health-overview.json';
-  assert.equal(adapter.files.has(path), true);
+  const path = plugin.settings.cacheFolder + '/dashboards/health-overview.json';
+  assert.equal(adapter.files.has(path), true, 'expected ' + path);
   const cache = await plugin.readDashboardCache(spec);
   assert.equal(cache.dashboardId, 'health-overview');
   assert.deepEqual(unwrap(cache.tiles[0].rows), [[42]]);
   assert.equal(typeof cache.computedAt, 'string');
   /* A cache written by 0.1.x under the database stem is still found. */
   const old = { id: 'legacy-dash', title: 'L', database: '07 Data/mypka-health.db', tiles: [] };
-  await adapter.write('07 Data/Dashboard Cache/mypka-health/legacy-dash.json',
+  await adapter.write(plugin.settings.cacheFolder + '/mypka-health/legacy-dash.json',
     JSON.stringify({ dashboardId: 'legacy-dash', computedAt: '2026-09-01T00:00:00Z', tiles: [] }));
   const legacy = await plugin.readDashboardCache(old);
   assert.equal(legacy.dashboardId, 'legacy-dash');

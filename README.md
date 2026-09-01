@@ -1,9 +1,12 @@
 # ICOR for Life - SQLite Viewer
 
-Open, browse and chart the SQLite databases that live inside your vault,
-read-only, on every device. The 6 GB health archive answers in
-milliseconds on the desktop; the phone shows the same dashboards from a
-synced cache.
+Open, browse and chart the SQLite databases that live inside your
+Obsidian vault, read-only, on every device. A multi-gigabyte database
+answers in milliseconds on the desktop; the phone shows the same
+dashboards from a synced cache.
+
+Made by [myICOR](https://myicor.com). Part of the ICOR for Life plugin
+suite, and useful in any vault that keeps SQLite files.
 
 **Beta.** In daily use in a real vault; rough edges likely. Open an issue.
 
@@ -19,7 +22,7 @@ Click a `.db`, `.sqlite` or `.sqlite3` file in the file explorer and a
 browser opens: every table with its row count, the schema with its
 indexes, the data page by page with sorting and per-column filters, and a
 console for your own queries with a "Copy as CSV" button. Dashboards are
-small JSON files in `07 Data/Dashboards/`; the plugin runs their queries
+small JSON files in the dashboards folder (default `07 Databases/Dashboards`); the plugin runs their queries
 and draws line charts, bar charts, stat tiles and tables itself, in your
 theme's own colors, light and dark.
 
@@ -55,7 +58,7 @@ freeze. Long queries are stopped after a timeout (30 seconds by default).
 
 The big database never travels to the phone. When a dashboard renders on
 the desktop, its query results are saved as JSON under
-`07 Data/Dashboard Cache/` and sync like any note. A device that cannot
+the cache folder (default `07 Databases/Dashboard Cache`) and sync like any note. A device that cannot
 open the database shows the cached dashboard with a plain line: "Computed
 on desktop, 2 hours ago." Databases under the size cap render live
 everywhere.
@@ -106,7 +109,7 @@ overwrites a file that exists. The format, in one glance:
 {
   "id": "health-overview",
   "title": "Health Overview",
-  "database": "07 Data/mypka-health.db",
+  "database": "07 Databases/mypka-health.db",
   "tiles": [
     {
       "title": "Daily steps, last 90 days",
@@ -125,9 +128,24 @@ for a multi-series chart; `"stack": true` stacks a bar chart's series.
 A tile's SQL passes the same read-only gate as everything else, at parse
 time, before it is ever run.
 
-## Moving databases into 07 Data
+## The home folder: 07 Databases
 
-Settings carries one tidy-up button: "Move databases into 07 Data". It
+Databases can live anywhere in the vault; the plugin finds every .db,
+.sqlite and .sqlite3 file wherever it is. Its own files (the dashboards
+folder and the dashboard cache) default to a "07 Databases" folder, and
+all three paths are settings. **The folder is never created just because
+it is the default**: it appears when a dashboard or cache file is first
+written there, or when the migration button runs.
+
+**Vaults from before 0.5.0:** the default used to be "07 Data". When the
+configured folder does not exist but "07 Data" does, the plugin quietly
+keeps using "07 Data"; nothing moves and nothing breaks. A folder you set
+yourself in the settings always wins.
+
+## Moving databases into the home folder
+
+Settings carries one tidy-up button: "Move databases into 07 Databases"
+(or whatever the data folder is set to). It
 lists every database found elsewhere in the vault with its old and new
 path, and moves them only after you confirm. Moving changes where the
 databases live; tools outside Obsidian that connect to them may need the
@@ -161,19 +179,38 @@ inside them; explicit flat styles cover other themes.
   size and location
 - **SQLite Viewer: Open database browser**
 
-## What it never does
+## Security and privacy, stated plainly
 
-- Never writes to a database. Not a byte, not a PRAGMA that would.
-- Never sends anything anywhere. No network, no telemetry, no accounts.
-- Never runs your SQL through a shell.
-- Never deletes or overwrites a file.
+- **Read-only toward every database, enforced twice.** Every statement
+  passes a gate (one statement, starting with SELECT, WITH, PRAGMA or
+  EXPLAIN, ATTACH refused), and the database is opened read-only on top
+  of that. The gate is tested, including mutation runs that watched it
+  fail when the rule was removed.
+- **On the desktop** the plugin runs your system's `sqlite3` command line
+  tool, one process per query, read-only (`-readonly` plus a `mode=ro`
+  URI), with the SQL passed as an argument, never through a shell. This
+  path exists only on the desktop app and is gated behind Obsidian's
+  desktop check.
+- **On phones and tablets** (and desktops without sqlite3) it uses
+  sql.js, a WebAssembly build of SQLite that ships inside the plugin
+  folder and works on an in-memory copy of the file. Nothing is ever
+  downloaded or loaded from the network; see THIRD-PARTY-NOTICES.md.
+- **No network, no telemetry, no analytics, no accounts.** The plugin
+  never connects anywhere.
+- **What it writes**, all inside the vault: dashboard JSON files, the
+  dashboard cache, starter files (once, only when missing), and its own
+  settings. The migration button moves database files only after you
+  confirm an exact list, and never overwrites anything.
+- Never runs your SQL through a shell. Never deletes a file.
 
-## Install (manual, for now)
+## Install
 
-Copy `manifest.json`, `main.js`, `styles.css`, `sql-wasm.js` and
+From Obsidian's Community plugins directory once listed, or manually:
+copy `manifest.json`, `main.js`, `styles.css`, `sql-wasm.js` and
 `sql-wasm.wasm` into
 `<vault>/.obsidian/plugins/icor-for-life-sqlite-viewer/` and enable the
-plugin in Settings, Community plugins.
+plugin in Settings, Community plugins. Works on desktop and mobile;
+the sqlite3 fast path is desktop-only, everything else runs everywhere.
 
 ## Tests
 

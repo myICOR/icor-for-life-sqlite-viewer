@@ -113,14 +113,35 @@ const GRID_UNIT_PX = 170;
 const GRID_GAP_PX = 12;
 const SPAN_CAP = 12;
 
+/* Vaults from before 0.5.0 keep their "07 Data" home: when the configured
+ * data folder does not exist but the legacy one does, the legacy folder is
+ * adopted for this session, silently. A folder the member configured and
+ * actually has always wins, and nothing is ever created just because it
+ * is the default. Pure: existence arrives as a map. */
+const LEGACY_DATA_FOLDER = '07 Data';
+
+function adoptLegacyFolders(settings, existsMap) {
+  if (existsMap[settings.dataFolder]) return null;
+  if (settings.dataFolder === LEGACY_DATA_FOLDER) return null;
+  if (!existsMap[LEGACY_DATA_FOLDER]) return null;
+  const adopted = { dataFolder: LEGACY_DATA_FOLDER };
+  if (settings.dashboardFolder === DEFAULT_SETTINGS.dashboardFolder) {
+    adopted.dashboardFolder = LEGACY_DATA_FOLDER + '/Dashboards';
+  }
+  if (settings.cacheFolder === DEFAULT_SETTINGS.cacheFolder) {
+    adopted.cacheFolder = LEGACY_DATA_FOLDER + '/Dashboard Cache';
+  }
+  return adopted;
+}
+
 const DEFAULT_SETTINGS = {
   pageSize: 50,
   rowCap: 500,
   queryTimeoutSec: 30,
   mobileCapMb: 200,
-  dashboardFolder: '07 Data/Dashboards',
-  cacheFolder: '07 Data/Dashboard Cache',
-  dataFolder: '07 Data',
+  dashboardFolder: '07 Databases/Dashboards',
+  cacheFolder: '07 Databases/Dashboard Cache',
+  dataFolder: '07 Databases',
   sqlite3Path: '',
 };
 
@@ -381,7 +402,7 @@ function parseDashboardSpec(text) {
     return { ok: false, reason: 'The dashboard needs a "title".' };
   }
   if (raw.database !== undefined && (typeof raw.database !== 'string' || !raw.database.trim())) {
-    return { ok: false, reason: 'The "database" must be a vault path like "07 Data/example.db".' };
+    return { ok: false, reason: 'The "database" must be a vault path like "07 Databases/example.db".' };
   }
   if (!validTimeframe(raw.globalTimeframe, false)) {
     return { ok: false, reason: 'The "globalTimeframe" must be a preset like {"preset":"90d"} or {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}.' };
@@ -562,7 +583,7 @@ function catalogPathFor(cacheFolder, dbPath) {
  * data folder moves to its top level, sidecars travel with their database,
  * nothing is ever overwritten. Pure: takes paths, returns the plan. */
 function planMigration(dbPaths, existingPaths, targetRoot) {
-  const root = normalizePath(targetRoot || '07 Data');
+  const root = normalizePath(targetRoot || '07 Databases');
   const moves = [];
   const skips = [];
   const claimed = new Set();
@@ -3550,7 +3571,7 @@ writes these same files; editing them by hand stays fine.
 {
   "id": "my-dashboard",
   "title": "My Dashboard",
-  "database": "07 Data/example.db",
+  "database": "07 Databases/example.db",
   "globalTimeframe": { "preset": "90d" },
   "tiles": [
     {
@@ -3748,6 +3769,7 @@ const STARTER_DASHBOARDS = [
 class IcorSqliteViewerPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    await this.adoptFoldersIfLegacy();
     this.query = new QueryService(this);
     this.query.detect();
 
@@ -3812,6 +3834,20 @@ class IcorSqliteViewerPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  }
+
+  /* The 0.5.0 rename: the default home moved from "07 Data" to
+   * "07 Databases". A vault that still has the old folder and not the new
+   * one keeps working against the old one, silently, for this session.
+   * Nothing is written and nothing is created here. */
+  async adoptFoldersIfLegacy() {
+    const adapter = this.app.vault.adapter;
+    const existsMap = {
+      [this.settings.dataFolder]: await adapter.exists(this.settings.dataFolder),
+      [LEGACY_DATA_FOLDER]: await adapter.exists(LEGACY_DATA_FOLDER),
+    };
+    const adopted = adoptLegacyFolders(this.settings, existsMap);
+    if (adopted) Object.assign(this.settings, adopted);
   }
 
   async saveSettings() {
@@ -3935,12 +3971,18 @@ class IcorSqliteViewerPlugin extends Plugin {
     const folder = this.settings.dashboardFolder;
     await ensureFolder(adapter, folder);
     const readmePath = folder + '/README.md';
-    if (!(await adapter.exists(readmePath))) await adapter.write(readmePath, DASHBOARD_README);
+    if (!(await adapter.exists(readmePath))) {
+      await adapter.write(readmePath, DASHBOARD_README.replace(/07 Databases/g, this.settings.dataFolder));
+    }
     for (const starter of STARTER_DASHBOARDS) {
       const path = folder + '/' + starter.file;
       if (await adapter.exists(path)) continue;
-      if (!(await adapter.exists(starter.spec.database))) continue;
-      await adapter.write(path, JSON.stringify(starter.spec, null, 2) + '\n');
+      const spec = JSON.parse(JSON.stringify(starter.spec));
+      if (spec.database.startsWith(LEGACY_DATA_FOLDER + '/')) {
+        spec.database = this.settings.dataFolder + spec.database.slice(LEGACY_DATA_FOLDER.length);
+      }
+      if (!(await adapter.exists(spec.database))) continue;
+      await adapter.write(path, JSON.stringify(spec, null, 2) + '\n');
     }
   }
 
@@ -4054,6 +4096,7 @@ IcorSqliteViewerPlugin.lib = {
   findSpot, packLayout, normalizeLayout, showAddTile, seriesPaletteFor, barPath,
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
+  adoptLegacyFolders, LEGACY_DATA_FOLDER,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
   STARTER_DASHBOARDS, DEFAULT_SETTINGS, PRESET_LABELS, AGG_LABELS, DEFAULT_GLOBAL_TIMEFRAME,
 };

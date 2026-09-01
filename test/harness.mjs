@@ -159,7 +159,15 @@ export function makeFakeAdapter(initialFiles = {}, initialBinaries = {}) {
   const log = [];
   return {
     files, binaries, folders, log,
-    async exists(p) { return files.has(p) || binaries.has(p) || folders.has(p); },
+    async exists(p) {
+      if (files.has(p) || binaries.has(p) || folders.has(p)) return true;
+      /* Like a real vault: a folder exists when something lives under it. */
+      const prefix = p + '/';
+      for (const key of files.keys()) if (key.startsWith(prefix)) return true;
+      for (const key of binaries.keys()) if (key.startsWith(prefix)) return true;
+      for (const key of folders) if (key.startsWith(prefix)) return true;
+      return false;
+    },
     async stat(p) {
       if (binaries.has(p)) return { size: binaries.get(p).length, mtime: 1 };
       return files.has(p) ? { size: (files.get(p) || '').length, mtime: 1 } : null;
