@@ -4,6 +4,21 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.5.3] - 2026-09-01
+
+### Fixed
+- A community-directory install now works: Obsidian's installer downloads
+  only `main.js`, `manifest.json` and `styles.css`, so the sql.js engine
+  (`sql-wasm.js` + `sql-wasm.wasm`) is now embedded in `main.js` as
+  base64, byte-identical to the standalone files. The standalone copies
+  are preferred when installed alongside (manual installs); the embedded
+  copies answer otherwise. Three new gates, including a simulated
+  three-file install answering `SELECT 1`.
+
+### Changed
+- `main.js` grows to about 1.1 MB from the embedded engine; common for
+  wasm plugins and the cost of a directory install that works everywhere.
+
 ## [0.5.2] - 2026-09-01
 
 ### Security

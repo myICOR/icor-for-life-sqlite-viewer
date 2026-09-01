@@ -223,12 +223,18 @@ inside them; explicit flat styles cover other themes.
 
 ## Install
 
-From Obsidian's Community plugins directory once listed, or manually:
-copy `manifest.json`, `main.js`, `styles.css`, `sql-wasm.js` and
-`sql-wasm.wasm` into
+From Obsidian's Community plugins directory once listed: the installer
+downloads `main.js`, `manifest.json` and `styles.css`, and that is the
+whole plugin; the sql.js engine is embedded in `main.js`, so those three
+files include everything.
+
+Or manually: copy `manifest.json`, `main.js` and `styles.css` into
 `<vault>/.obsidian/plugins/icor-for-life-sqlite-viewer/` and enable the
-plugin in Settings, Community plugins. Works on desktop and mobile;
-the sqlite3 fast path is desktop-only, everything else runs everywhere.
+plugin in Settings, Community plugins. Optionally also copy
+`sql-wasm.js` and `sql-wasm.wasm`; when the standalone files are
+present the plugin prefers them over the embedded copies. Works on
+desktop and mobile; the sqlite3 fast path is desktop-only, everything
+else runs everywhere.
 
 ## Tests
 

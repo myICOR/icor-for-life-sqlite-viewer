@@ -182,6 +182,65 @@ test('Engine B end to end: real bytes through the plugin loader, on the mobile p
   await assert.rejects(plugin.query.query('07 Data/tiny.db', 'DELETE FROM things'), /Only read queries/);
 });
 
+/* -------------------------------------- the embedded runtime (0.5.3) -- */
+
+test('the embedded copies decode byte-identical to the vendored standalone files', () => {
+  const embeddedJs = Buffer.from(lib.utf8OfB64(lib.EMBEDDED_SQL_WASM_JS_B64), 'utf8');
+  assert.ok(embeddedJs.equals(readFileSync(resolve(repo, 'sql-wasm.js'))),
+    'embedded sql-wasm.js drifted from the vendored file; regenerate per the comment in main.js');
+  const embeddedWasm = Buffer.from(lib.bytesOfB64(lib.EMBEDDED_SQL_WASM_B64));
+  assert.ok(embeddedWasm.equals(readFileSync(resolve(repo, 'sql-wasm.wasm'))),
+    'embedded sql-wasm.wasm drifted from the vendored file; regenerate per the comment in main.js');
+});
+
+test('Engine B on a three-file install: the embedded sql.js answers with no standalone files present', async () => {
+  /* Build a real database in the test realm with the vendored sql.js. */
+  const initSqlJs = nodeRequire(resolve(repo, 'sql-wasm.js'));
+  const SQL = await initSqlJs({ wasmBinary: readFileSync(resolve(repo, 'sql-wasm.wasm')) });
+  const source = new SQL.Database();
+  source.run('CREATE TABLE t (n INTEGER)');
+  source.run('INSERT INTO t VALUES (1)');
+  const bytes = source.export();
+  source.close();
+
+  /* The community-directory installer downloads main.js, manifest.json
+   * and styles.css only, so the plugin folder holds neither sql-wasm.js
+   * nor sql-wasm.wasm. */
+  const adapter = makeFakeAdapter({}, { '07 Data/tiny.db': bytes });
+  const { plugin } = await makeServicePlugin(adapter, { desktop: false });
+  const choice = await plugin.query.engineFor('07 Data/tiny.db');
+  assert.equal(choice.engine, 'wasm');
+  const res = await plugin.query.query('07 Data/tiny.db', 'SELECT 1 AS one');
+  assert.equal(res.engine, 'wasm');
+  assert.deepEqual(unwrap(res.rows), [[1]]);
+});
+
+test('a five-file install still prefers the standalone copies over the embedded ones', async () => {
+  const initSqlJs = nodeRequire(resolve(repo, 'sql-wasm.js'));
+  const SQL = await initSqlJs({ wasmBinary: readFileSync(resolve(repo, 'sql-wasm.wasm')) });
+  const source = new SQL.Database();
+  source.run('CREATE TABLE t (n INTEGER)');
+  const bytes = source.export();
+  source.close();
+
+  const pluginDir = '.obsidian/plugins/icor-for-life-sqlite-viewer';
+  const adapter = makeFakeAdapter(
+    { [pluginDir + '/sql-wasm.js']: readFileSync(resolve(repo, 'sql-wasm.js'), 'utf8') },
+    {
+      [pluginDir + '/sql-wasm.wasm']: readFileSync(resolve(repo, 'sql-wasm.wasm')),
+      '07 Data/tiny.db': bytes,
+    }
+  );
+  const reads = [];
+  const origRead = adapter.read.bind(adapter);
+  adapter.read = async (p) => { reads.push(p); return origRead(p); };
+  const { plugin } = await makeServicePlugin(adapter, { desktop: false });
+  const res = await plugin.query.query('07 Data/tiny.db', 'SELECT 1 AS one');
+  assert.equal(res.engine, 'wasm');
+  assert.ok(reads.includes(pluginDir + '/sql-wasm.js'),
+    'the standalone sql-wasm.js must be the copy the engine reads when it exists');
+});
+
 /* ---------------------------------------------------- the dashboard cache -- */
 
 test('the cache round-trips through the adapter, keyed by dashboard id, and a 0.1.x cache still reads', async () => {
