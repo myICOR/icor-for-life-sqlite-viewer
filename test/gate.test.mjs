@@ -11,6 +11,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, resolve } from 'node:path';
 
 import { loadPlugin } from './harness.mjs';
 
@@ -186,6 +189,61 @@ test('the read-only PRAGMAs still pass: introspection is the whole point', () =>
   ]) {
     assert.equal(lib.gateStatement(sql).ok, true, sql + ' must pass');
   }
+});
+
+/* ------------------------------------------- the 0.5.2 tightening (L5) -- */
+
+test("Vex's L5 probes: the paren set form of a scalar PRAGMA is refused", () => {
+  for (const sql of [
+    'PRAGMA user_version(7)',
+    'PRAGMA application_id(1)',
+    'PRAGMA page_size(4096)',
+    'PRAGMA max_page_count(100)',
+    'PRAGMA journal_size_limit(1000)',
+    'pragma user_version (7)',
+    'PRAGMA schema_version(9)',
+    'PRAGMA encoding("UTF-16")',
+    'PRAGMA table_info = 1',
+  ]) {
+    const r = lib.gateStatement(sql);
+    assert.equal(r.ok, false, sql + ' must be refused');
+  }
+  assert.match(lib.gateStatement('PRAGMA user_version(7)').reason, /PRAGMA/,
+    'the refusal names PRAGMA in plain words');
+});
+
+test('the introspection parens and the bare scalar reads still pass', () => {
+  for (const sql of [
+    "PRAGMA table_info('t')",
+    'PRAGMA table_xinfo(t)',
+    'PRAGMA table_list(members)',
+    'PRAGMA index_list("t")',
+    'PRAGMA index_info("idx")',
+    'PRAGMA index_xinfo("idx")',
+    'PRAGMA foreign_key_list("t")',
+    'PRAGMA integrity_check(10)',
+    'PRAGMA quick_check(5)',
+    'PRAGMA user_version',
+    'PRAGMA application_id',
+    'PRAGMA page_size',
+  ]) {
+    assert.equal(lib.gateStatement(sql).ok, true, sql + ' must pass');
+  }
+});
+
+test('mutation run: with the value check stripped the paren set slips through, so the check owns its gate', () => {
+  const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const source = readFileSync(resolve(repo, 'main.js'), 'utf8');
+  const guard = "if (m && m[2] && (m[2] === '=' || !READ_PRAGMA_FUNCS.has(name))) {";
+  assert.ok(source.includes(guard), 'the guard this mutation strips must exist in main.js');
+  const mutated = source.replace(guard, 'if (false) {');
+  const mutant = loadPlugin({ sourceOverride: mutated }).lib;
+  assert.equal(mutant.gateStatement('PRAGMA user_version(7)').ok, true,
+    'the mutant must allow the paren set, or the real refusal is not owned by this check');
+  assert.equal(mutant.gateStatement('PRAGMA user_version = 999').ok, true,
+    'the mutant must allow the = set too: both refusals live in the one guard');
+  assert.equal(lib.gateStatement('PRAGMA user_version(7)').ok, false,
+    'and the real gate refuses what the mutant allowed');
 });
 
 test('write verbs inside names and strings do not trip the hardened gate', () => {

@@ -110,8 +110,10 @@ export function makeObsidian({ desktop = true } = {}) {
 }
 
 /* Load main.js. Returns the plugin class, the pure library it exposes for
- * the gates, and a `makePlugin(app)` that constructs an instance. */
-export function loadPlugin({ desktop = true } = {}) {
+ * the gates, and a `makePlugin(app)` that constructs an instance.
+ * `sourceOverride` loads a mutated copy of main.js instead, so a gate can
+ * prove its guard owns the refusal rather than passing vacuously. */
+export function loadPlugin({ desktop = true, sourceOverride = null } = {}) {
   const obsidian = makeObsidian({ desktop });
   const body = makeEl('body');
   const doc = {
@@ -133,7 +135,7 @@ export function loadPlugin({ desktop = true } = {}) {
   };
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
-  vm.runInContext(source, sandbox, { filename: 'main.js' });
+  vm.runInContext(sourceOverride || source, sandbox, { filename: 'main.js' });
   const PluginClass = sandbox.module.exports;
   return {
     PluginClass,

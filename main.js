@@ -83,6 +83,14 @@ const READ_PRAGMAS = new Set([
   'schema_version', 'user_version', 'data_version', 'application_id',
   'integrity_check', 'quick_check', 'encoding', 'journal_size_limit',
 ]);
+/* The introspection PRAGMAs that genuinely take a parenthesized argument,
+ * a table or index name or a row cap, never a value being set. For every
+ * other allowlisted name SQLite reads "PRAGMA name(value)" as a set, the
+ * same write as "PRAGMA name = value", so the paren form is refused. */
+const READ_PRAGMA_FUNCS = new Set([
+  'table_info', 'table_xinfo', 'table_list', 'index_list', 'index_info', 'index_xinfo',
+  'foreign_key_list', 'integrity_check', 'quick_check',
+]);
 const VIZ_KINDS = new Set(['line', 'bar', 'stat', 'table']);
 const VIEW_BROWSER = 'icor-sqlite-viewer-browser';
 const VIEW_DASHBOARDS = 'icor-sqlite-viewer-dashboards';
@@ -301,13 +309,19 @@ function gateStatement(sql) {
     return { ok: false, reason: 'Only read queries run here. A statement that writes (INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, VACUUM and friends) is refused, even behind a WITH clause.' };
   }
   /* PRAGMA is a family, and half the family writes. Only the read-only
-   * introspection PRAGMAs pass, and never the assignment form. */
+   * introspection PRAGMAs pass, and never a set form. SQLite spells a set
+   * two ways, "PRAGMA name = value" and "PRAGMA name(value)", so a
+   * parenthesized argument counts as a set for every scalar PRAGMA; parens
+   * stay legal only for the introspection PRAGMAs that genuinely take an
+   * argument, like table_info('t') or integrity_check(10). */
   if (kw === 'pragma') {
     const m = /^\s*pragma\s+([a-z0-9_]+)\s*(=|\()?/i.exec(stripped);
     const name = m && m[1] ? m[1].toLowerCase() : '';
-    const isAssignment = !!(m && m[2] === '=');
-    if (!READ_PRAGMAS.has(name) || isAssignment) {
+    if (!READ_PRAGMAS.has(name)) {
       return { ok: false, reason: 'That PRAGMA can change the database. Only read-only PRAGMAs run here, for example table_info, index_list or integrity_check.' };
+    }
+    if (m && m[2] && (m[2] === '=' || !READ_PRAGMA_FUNCS.has(name))) {
+      return { ok: false, reason: 'A PRAGMA given a value can change the database. Only the bare read form of ' + name + ' runs here.' };
     }
   }
   return { ok: true };
@@ -4224,7 +4238,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
-  shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS,
+  shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
   STARTER_DASHBOARDS, DEFAULT_SETTINGS, PRESET_LABELS, AGG_LABELS, DEFAULT_GLOBAL_TIMEFRAME,
 };
