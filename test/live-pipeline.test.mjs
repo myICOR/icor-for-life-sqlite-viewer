@@ -93,7 +93,10 @@ test('the full dashboard pipeline against the real vault, on the GUI PATH', { sk
         cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows }));
       }
       await plugin.writeDashboardCache(spec, cachedTiles);
-      const cacheFile = join(overlay, '07 Data', 'Dashboard Cache', 'dashboards', spec.id + '.json');
+      /* The cache folder is whatever the plugin resolved for THIS vault
+       * (07 Databases, or 07 Data on a vault the adoption path has not
+       * renamed) - derived, never hardcoded, so both vault names pass. */
+      const cacheFile = join(overlay, ...plugin.settings.cacheFolder.split('/'), 'dashboards', spec.id + '.json');
       assert.ok(existsSync(cacheFile), 'the cache must be written for ' + spec.id);
       const cache = JSON.parse(readFileSync(cacheFile, 'utf8'));
       assert.equal(cache.tiles.length, spec.tiles.length);
