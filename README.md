@@ -248,6 +248,11 @@ dashboard spec parsing, migration planning and execution, the process
 runner's exact arguments, and an end-to-end query through the bundled
 sql.js on real bytes.
 
+## Support
+
+This plugin is free. If you want to support us, become a myICOR member at
+https://myicor.com and enjoy everything membership includes.
+
 ## License
 
 Source-available, personal use for ICOR for Life members; see LICENSE.
