@@ -16,7 +16,7 @@ Two channels, in order of preference:
    [Security tab](https://github.com/myICOR/icor-for-life-sqlite-viewer/security/advisories/new)
    of this repository and open a draft advisory. This keeps the report private
    between you and the maintainer until a fix ships.
-2. **Email** `team@myicor.com` with `SECURITY` and `icor-for-life-sqlite-viewer`
+2. **Email** `support@myicor.com` with `SECURITY` and `icor-for-life-sqlite-viewer`
    in the subject line. This is a monitored mailbox.
 
 A useful report contains:
