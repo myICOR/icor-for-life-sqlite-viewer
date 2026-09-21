@@ -4,6 +4,16 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] - 2026-09-21
+
+### Changed
+- Relicensed under MIT. Releases before 0.6.0 remain under the ICOR for Life
+  Source-Available License (Code) v1.0.
+- README rewritten for the person installing the plugin, not the person rebuilding it.
+- Security contact is support@myicor.com.
+- The live test derives its cache folder from the plugin's resolved settings.
+- README: a support section instead of a fundingUrl.
+
 ## [0.5.3] - 2026-09-01
 
 ### Fixed
