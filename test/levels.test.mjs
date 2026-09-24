@@ -39,9 +39,9 @@ const statTile = (extra) => Object.assign({ title: 'Index', viz: 'stat', sql: 'S
 
 test('the default levels are Good, Watch and Alert, coloured by theme variables', () => {
   assert.deepEqual(unwrap(lib.DEFAULT_SETTINGS.levels), [
-    { name: 'Good', color: 'var(--color-green)' },
-    { name: 'Watch', color: 'var(--color-orange)' },
-    { name: 'Alert', color: 'var(--color-red)' },
+    { id: 'good', name: 'Good', color: 'var(--color-green)' },
+    { id: 'watch', name: 'Watch', color: 'var(--color-orange)' },
+    { id: 'alert', name: 'Alert', color: 'var(--color-red)' },
   ]);
   assert.deepEqual(unwrap(lib.DEFAULT_SETTINGS.levelLooks), { stat: 'rail' });
   assert.deepEqual(Object.keys(lib.LEVEL_LOOKS.stat), ['rail', 'outline', 'tint']);
@@ -58,7 +58,7 @@ test('saved levels are made safe on load: bad entries dropped, bad colours clear
     { name: 'Fine', color: '#000000' },
     'nonsense',
     { name: 'Odd', color: 'red; background: url(x)' },
-  ])), [{ name: 'Fine', color: '#00aa00' }, { name: 'Odd', color: '' }]);
+  ])), [{ id: 'fine', name: 'Fine', color: '#00aa00' }, { id: 'odd', name: 'Odd', color: '' }]);
   assert.deepEqual(unwrap(lib.normalizeLevels([])), [], 'a member who removed every level keeps none');
   assert.deepEqual(unwrap(lib.normalizeLevelLooks({ stat: 'tint' })), { stat: 'tint' });
   assert.deepEqual(unwrap(lib.normalizeLevelLooks({ stat: 'neon' })), { stat: 'rail' });
@@ -77,8 +77,8 @@ test('the plugin normalizes its saved levels when it loads', async () => {
   const app = { vault: { adapter: makeFakeAdapter(), getFiles: () => [] }, workspace: { onLayoutReady: () => {}, on: () => ({}) } };
   const plugin = fresh.makePlugin(app, { levels: [{ name: 'Fine', color: '#00ff00' }, { name: '' }], levelLooks: { stat: 'outline' } });
   await plugin.onload();
-  assert.deepEqual(unwrap(plugin.settings.levels), [{ name: 'Fine', color: '#00ff00' }]);
-  assert.deepEqual(unwrap(plugin.levelExtras()), { levels: [{ name: 'Fine', color: '#00ff00' }], levelLooks: { stat: 'outline' } });
+  assert.deepEqual(unwrap(plugin.settings.levels), [{ id: 'fine', name: 'Fine', color: '#00ff00' }]);
+  assert.deepEqual(unwrap(plugin.levelExtras()), { levels: [{ id: 'fine', name: 'Fine', color: '#00ff00' }], levelLooks: { stat: 'outline' } });
 });
 
 /* ------------------------------------------------------ classification -- */
@@ -485,4 +485,94 @@ test('the edit screen marks an overridden widget and resets it to the settings',
   reset.handlers.click[0]();
   assert.equal(byClass(again.form.formEl, 'icor-sqlv-level-override-mark').length, 0);
   assert.equal(again.form.buildTile().tile.levelColors, undefined, 'back on the settings colours');
+});
+
+/* ---------------------------------------------- renames carry over (r4n) -- */
+
+test('every level carries a stable id that survives a rename; clashes and bad ids get fresh ones', () => {
+  const levels = lib.normalizeLevels([{ id: 'watch', name: 'Caution' }, { name: 'Good' }, { id: 'watch', name: 'Other' }, { id: 'BAD ID', name: 'Late' }]);
+  assert.deepEqual(unwrap(levels.map((l) => l.id)), ['watch', 'good', 'other', 'late']);
+  const taken = new Set(['good', 'alert']);
+  assert.equal(lib.levelIdFor('Level 4', taken), 'level-4');
+  assert.equal(lib.levelIdFor('Good', taken), 'good-2');
+  assert.equal(lib.levelIdFor('!!!', taken), 'level');
+});
+
+test('a rename is planned by id: checked for empty, too long, duplicate and missing', () => {
+  const levels = lib.normalizeLevels(undefined);
+  assert.deepEqual(unwrap(lib.planLevelRename(levels, 'watch', ' Caution ')), { ok: true, from: 'Watch', to: 'Caution', unchanged: false });
+  assert.equal(lib.planLevelRename(levels, 'watch', 'Watch').unchanged, true);
+  assert.match(lib.planLevelRename(levels, 'watch', '  ').reason, /needs a name/);
+  assert.match(lib.planLevelRename(levels, 'watch', 'x'.repeat(25)).reason, /24 characters at most/);
+  assert.match(lib.planLevelRename(levels, 'watch', 'Alert').reason, /already a level called Alert/);
+  assert.match(lib.planLevelRename(levels, 'gone', 'New').reason, /no longer in the settings/);
+});
+
+test('renameLevelInDashboard moves range levels and colour keys, and nothing else', () => {
+  const raw = {
+    id: 'd', title: 'D', unknownKey: 1,
+    tiles: [
+      { viz: 'stat', sql: 'SELECT 1', ranges: [{ low: 1, level: 'Watch' }, { level: 'Alert' }], levelColors: { Good: '#111111', Watch: '#222222' } },
+      { viz: 'stat', sql: 'SELECT 2', ranges: [{ level: 'Good' }] },
+      { viz: 'stat', sql: 'SELECT 3', ranges: [{ level: 'Watch' }], levelColors: { Watch: '#222222', Caution: '#333333' } },
+      'junk',
+    ],
+  };
+  assert.equal(lib.renameLevelInDashboard(raw, 'Watch', 'Caution'), 2);
+  assert.deepEqual(unwrap(raw.tiles[0]), { viz: 'stat', sql: 'SELECT 1', ranges: [{ low: 1, level: 'Caution' }, { level: 'Alert' }], levelColors: { Good: '#111111', Caution: '#222222' } });
+  assert.deepEqual(unwrap(raw.tiles[1].ranges), [{ level: 'Good' }], 'other levels untouched');
+  assert.deepEqual(unwrap(raw.tiles[2].levelColors), { Caution: '#333333' }, 'a colour already set under the new name is kept');
+  assert.equal(raw.unknownKey, 1);
+  assert.equal(lib.renameLevelInDashboard(raw, 'Nope', 'Caution'), 0);
+  assert.equal(lib.renameLevelInDashboard({ tiles: 'x' }, 'Watch', 'Caution'), 0);
+  assert.equal(lib.renameLevelInDashboard(null, 'Watch', 'Caution'), 0);
+});
+
+test('a rename in the settings rewrites every dashboard and the cache; delete plus add rewrites nothing', async () => {
+  const dash = (id, level) => JSON.stringify({ id, title: id, database: '07 Databases/x.db', tiles: [statTile({ ranges: [{ low: 1, level }, { level: 'Alert' }] })] }, null, 2) + '\n';
+  const files = {
+    '07 Databases/Dashboards/a.json': dash('a', 'Watch'),
+    '07 Databases/Dashboards/b.json': dash('b', 'Good'),
+    '07 Databases/Dashboards/notes.json': '{ not json',
+    '07 Databases/Dashboard Cache/dashboards/a.json': JSON.stringify({ dashboardId: 'a', computedAt: 'x', tiles: [{ viz: 'stat', ranges: [{ level: 'Watch' }], levelColors: { Watch: '#222222' }, rows: [[1]] }] }),
+  };
+  const fresh = loadPlugin();
+  const adapter = makeFakeAdapter(files, { '07 Databases/x.db': new Uint8Array([1]) });
+  const reloaded = [];
+  const app = { vault: { adapter, getFiles: () => [] }, workspace: { onLayoutReady: () => {}, on: () => ({}), getLeavesOfType: () => [{ view: { reload: async () => { reloaded.push(1); } } }] } };
+  const plugin = fresh.makePlugin(app);
+  await plugin.onload();
+
+  /* Delete Watch, add a new level and name it Watch: a different level
+   * (its own id), so no widget is touched. */
+  const before = new Map(adapter.files);
+  plugin.settings.levels.splice(1, 1);
+  plugin.settings.levels.push({ id: lib.levelIdFor('Level 3', new Set(plugin.settings.levels.map((l) => l.id))), name: 'Level 3', color: '' });
+  const r0 = await plugin.renameLevel('level-3', 'Watch');
+  assert.equal(r0.ok, true, r0.reason);
+  assert.equal(r0.from, 'Level 3');
+  assert.equal(r0.widgets, 0);
+  assert.deepEqual([...adapter.files.entries()], [...before.entries()], 'delete plus add rewrote nothing');
+
+  /* A real rename, by id. */
+  plugin.settings.levels = lib.normalizeLevels(undefined);
+  const r = await plugin.renameLevel('watch', 'Caution');
+  assert.equal(r.ok, true, r.reason);
+  assert.equal(r.widgets, 1);
+  assert.deepEqual(unwrap(plugin.settings.levels.map((l) => [l.id, l.name])), [['good', 'Good'], ['watch', 'Caution'], ['alert', 'Alert']]);
+  const a = adapter.files.get('07 Databases/Dashboards/a.json');
+  assert.deepEqual(JSON.parse(a).tiles[0].ranges[0], { low: 1, level: 'Caution' });
+  assert.ok(a.endsWith('}\n'));
+  assert.equal(lib.parseDashboardSpec(a).ok, true);
+  assert.equal(adapter.files.get('07 Databases/Dashboards/b.json'), files['07 Databases/Dashboards/b.json'], 'a dashboard without the level is untouched');
+  assert.equal(adapter.files.get('07 Databases/Dashboards/notes.json'), '{ not json', 'an unreadable file is left alone');
+  const cache = JSON.parse(adapter.files.get('07 Databases/Dashboard Cache/dashboards/a.json'));
+  assert.deepEqual(cache.tiles[0].ranges, [{ level: 'Caution' }], 'phones follow before the next desktop run');
+  assert.deepEqual(cache.tiles[0].levelColors, { Caution: '#222222' });
+  assert.ok(reloaded.length > 0, 'open dashboards redraw');
+  assert.deepEqual(plugin.saved.levels[1], { id: 'watch', name: 'Caution', color: 'var(--color-orange)' }, 'the settings file keeps the id');
+
+  const refused = await plugin.renameLevel('watch', 'Good');
+  assert.equal(refused.ok, false);
+  assert.equal(plugin.settings.levels[1].name, 'Caution', 'a refused rename changes nothing');
 });

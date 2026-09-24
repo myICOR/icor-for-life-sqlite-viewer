@@ -122,11 +122,14 @@ const LEVEL_THEME_COLORS = [
   ['var(--color-yellow)', 'Yellow'], ['var(--color-cyan)', 'Cyan'], ['var(--color-blue)', 'Blue'],
   ['var(--color-purple)', 'Purple'], ['var(--color-pink)', 'Pink'],
 ];
+/* Each level carries a stable id next to its name, so a rename in the
+ * settings is told apart from a delete plus an add. */
 const DEFAULT_LEVELS = [
-  { name: 'Good', color: 'var(--color-green)' },
-  { name: 'Watch', color: 'var(--color-orange)' },
-  { name: 'Alert', color: 'var(--color-red)' },
+  { id: 'good', name: 'Good', color: 'var(--color-green)' },
+  { id: 'watch', name: 'Watch', color: 'var(--color-orange)' },
+  { id: 'alert', name: 'Alert', color: 'var(--color-red)' },
 ];
+const LEVEL_ID_RE = /^[a-z0-9][a-z0-9-]{0,39}$/;
 /* How a level shows, per widget type. Only the stat tile draws a level
  * today; another widget type adds its own entry here. */
 const LEVEL_LOOKS = {
@@ -1225,14 +1228,68 @@ function normalizeLevels(raw) {
   if (!Array.isArray(raw)) return DEFAULT_LEVELS.map((l) => Object.assign({}, l));
   const out = [];
   const seen = new Set();
+  const ids = new Set();
   for (const l of raw) {
     if (!l || typeof l !== 'object') continue;
     const name = typeof l.name === 'string' ? l.name.trim() : '';
     if (!name || name.length > LEVEL_NAME_MAX || seen.has(name)) continue;
     seen.add(name);
-    out.push({ name, color: isLevelColor(l.color) ? l.color.trim() : '' });
+    const id = typeof l.id === 'string' && LEVEL_ID_RE.test(l.id) && !ids.has(l.id) ? l.id : levelIdFor(name, ids);
+    ids.add(id);
+    out.push({ id, name, color: isLevelColor(l.color) ? l.color.trim() : '' });
   }
   return out;
+}
+
+/* A fresh id for a level, from its name, never one already taken. */
+function levelIdFor(name, taken) {
+  const slug = String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30) || 'level';
+  let id = slug;
+  for (let n = 2; taken.has(id); n++) id = slug + '-' + n;
+  return id;
+}
+
+/* A rename, checked: the level is found by its id, never by its name.
+ * Returns { ok, from, to, unchanged } or { ok, reason }. */
+function planLevelRename(levels, id, newName) {
+  const level = Array.isArray(levels) ? levels.find((l) => l && l.id === id) : null;
+  if (!level) return { ok: false, reason: 'That level is no longer in the settings.' };
+  const to = typeof newName === 'string' ? newName.trim() : '';
+  if (!to) return { ok: false, reason: 'A level needs a name.' };
+  if (to.length > LEVEL_NAME_MAX) return { ok: false, reason: 'A level name can be ' + LEVEL_NAME_MAX + ' characters at most.' };
+  if (to === level.name) return { ok: true, from: level.name, to, unchanged: true };
+  if (levels.some((l) => l && l !== level && l.name === to)) return { ok: false, reason: 'There is already a level called ' + to + '.' };
+  return { ok: true, from: level.name, to, unchanged: false };
+}
+
+/* Carry a renamed level over inside one dashboard file (or one cache
+ * file: the same tiles list), in the raw JSON so nothing else in the file
+ * changes. Returns how many widgets changed. A widget that already has a
+ * colour under the new name keeps it; the old name's colour then goes. */
+function renameLevelInDashboard(raw, from, to) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.tiles) || !from || !to || from === to) return 0;
+  let changed = 0;
+  for (const tile of raw.tiles) {
+    if (!tile || typeof tile !== 'object') continue;
+    let hit = false;
+    if (Array.isArray(tile.ranges)) {
+      for (const r of tile.ranges) {
+        if (r && typeof r === 'object' && typeof r.level === 'string' && r.level.trim() === from) { r.level = to; hit = true; }
+      }
+    }
+    const colors = tile.levelColors;
+    if (colors && typeof colors === 'object' && !Array.isArray(colors) && Object.prototype.hasOwnProperty.call(colors, from)) {
+      const next = {};
+      for (const [key, value] of Object.entries(colors)) {
+        if (key === from) { if (!Object.prototype.hasOwnProperty.call(colors, to)) next[to] = value; }
+        else next[key] = value;
+      }
+      tile.levelColors = next;
+      hit = true;
+    }
+    if (hit) changed++;
+  }
+  return changed;
 }
 
 function normalizeLevelLooks(raw) {
@@ -4180,17 +4237,26 @@ class SqliteViewerSettingTab extends PluginSettingTab {
     const settings = this.plugin.settings;
     const save = async (redraw) => { await this.plugin.saveSettings(); if (redraw) this.display(); };
     new Setting(containerEl).setName('Value levels').setHeading();
-    containerEl.createDiv({ cls: 'icor-sqlv-note', text: 'A "One big number" widget can colour itself by where its number lands: each widget lists its own ranges and names one of these levels for each. The colour is never the only signal; the level name is read out, and a range can add a short text. Renaming a level leaves widgets that use the old name neutral until you edit them.' });
+    containerEl.createDiv({ cls: 'icor-sqlv-note', text: 'A "One big number" widget can colour itself by where its number lands: each widget lists its own ranges and names one of these levels for each. The colour is never the only signal; the level name is read out, and a range can add a short text. Renaming a level updates every widget that uses it, in every dashboard; removing one leaves its widgets neutral.' });
     settings.levels.forEach((level, i) => {
       const themed = LEVEL_THEME_COLORS.some(([v]) => v === level.color);
       const row = new Setting(containerEl).setName('Level ' + (i + 1));
-      row.addText((t) => t.setPlaceholder('Name').setValue(level.name).onChange(async (v) => {
-        const name = v.trim();
-        if (!name || name.length > LEVEL_NAME_MAX) return;
-        if (settings.levels.some((other, j) => j !== i && other.name === name)) { new Notice('There is already a level called ' + name + '.'); return; }
-        level.name = name;
-        await save(false);
-      }));
+      /* A rename lands when the field is left, never per keystroke, and
+       * goes by the level's id so it reaches every widget using it. */
+      row.addText((t) => {
+        t.setPlaceholder('Name').setValue(level.name);
+        const commit = async () => {
+          const result = await this.plugin.renameLevel(level.id, t.getValue());
+          if (!result.ok) { new Notice(result.reason); t.setValue(level.name); return; }
+          if (result.unchanged) return;
+          new Notice('Renamed ' + result.from + ' to ' + result.to + (result.widgets
+            ? ' in ' + result.widgets + (result.widgets === 1 ? ' widget.' : ' widgets.')
+            : '. No widget used it.'));
+          this.display();
+        };
+        t.inputEl.addEventListener('blur', () => { commit(); });
+        t.inputEl.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); t.inputEl.blur(); } });
+      });
       row.addDropdown((d) => {
         for (const [value, label] of LEVEL_THEME_COLORS) d.addOption(value, label + ' (theme)');
         d.addOption('custom', 'Custom colour');
@@ -4216,7 +4282,8 @@ class SqliteViewerSettingTab extends PluginSettingTab {
       .addButton((b) => b.setButtonText('Add a level').onClick(async () => {
         let n = settings.levels.length + 1;
         while (settings.levels.some((l) => l.name === 'Level ' + n)) n++;
-        settings.levels.push({ name: 'Level ' + n, color: 'var(--color-blue)' });
+        const name = 'Level ' + n;
+        settings.levels.push({ id: levelIdFor(name, new Set(settings.levels.map((l) => l.id))), name, color: 'var(--color-blue)' });
         await save(true);
       }))
       .addButton((b) => b.setButtonText('Back to Good, Watch, Alert').onClick(async () => {
@@ -4656,6 +4723,47 @@ class IcorSqliteViewerPlugin extends Plugin {
     this.settings.levelLooks = normalizeLevelLooks(this.settings.levelLooks);
   }
 
+  /* Rename a level in the settings and carry the new name into every
+   * widget that used the old one: every dashboard file, and the desktop
+   * cache so phones follow before the next desktop run. */
+  async renameLevel(id, newName) {
+    const plan = planLevelRename(this.settings.levels, id, newName);
+    if (!plan.ok || plan.unchanged) return plan;
+    this.settings.levels.find((l) => l.id === id).name = plan.to;
+    await this.saveSettings();
+    const widgets = await this.renameLevelInFiles(plan.from, plan.to);
+    return Object.assign({ widgets }, plan);
+  }
+
+  async renameLevelInFiles(from, to) {
+    const adapter = this.app.vault.adapter;
+    const folders = [
+      { folder: this.settings.dashboardFolder, dashboards: true },
+      { folder: normalizePath(this.settings.cacheFolder + '/dashboards'), dashboards: false },
+    ];
+    let widgets = 0;
+    for (const { folder, dashboards } of folders) {
+      if (!(await adapter.exists(folder))) continue;
+      const listing = await adapter.list(folder);
+      for (const path of listing.files) {
+        if (!path.toLowerCase().endsWith('.json')) continue;
+        let raw;
+        try { raw = JSON.parse(await adapter.read(path)); } catch (e) { continue; }
+        const changed = renameLevelInDashboard(raw, from, to);
+        if (!changed) continue;
+        await adapter.write(path, JSON.stringify(raw, null, 2) + (dashboards ? '\n' : ''));
+        if (dashboards) widgets += changed;
+      }
+    }
+    const ws = this.app.workspace;
+    if (ws && typeof ws.getLeavesOfType === 'function') {
+      for (const leaf of ws.getLeavesOfType(VIEW_DASHBOARDS)) {
+        if (leaf.view && typeof leaf.view.reload === 'function') await leaf.view.reload();
+      }
+    }
+    return widgets;
+  }
+
   /* What every tile render needs to draw value levels. */
   levelExtras() {
     const settings = this.settings || {};
@@ -4950,7 +5058,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
-  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, checkLevelColors, checkTileLevels, levelOf, resolveLevel, levelLookFor,
+  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, levelIdFor, planLevelRename, renameLevelInDashboard, normalizeLevelLooks, checkRanges, checkLevelColors, checkTileLevels, levelOf, resolveLevel, levelLookFor,
   LEVEL_THEME_COLORS, DEFAULT_LEVELS, LEVEL_LOOKS, DEFAULT_LEVEL_LOOKS,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
