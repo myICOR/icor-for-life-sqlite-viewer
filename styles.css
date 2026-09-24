@@ -1221,6 +1221,46 @@ button.icor-sqlv-add-filter { align-self: flex-start; }
 
 .icor-sqlv-range-row .icor-sqlv-wizard-input.icor-sqlv-range-num { flex: 0 1 5em; min-width: 4em; }
 
+/* Per-widget level colours: an override is marked in words, never by the
+ * colour alone, and carries its way back to the settings. */
+.icor-sqlv-level-colors {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sqlv-s2);
+  margin-top: var(--sqlv-s3);
+  padding-top: var(--sqlv-s2);
+  border-top: 1px solid var(--sqlv-hairline-subtle);
+}
+
+.icor-sqlv-level-colors.is-overridden {
+  border-left: 3px solid var(--sqlv-warning);
+  padding-left: var(--sqlv-s2);
+}
+
+.icor-sqlv-level-colors-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sqlv-s2); }
+
+.icor-sqlv-level-override-mark {
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg);
+  padding: 1px var(--sqlv-s2);
+  border-radius: var(--sqlv-r-pill);
+  border: 1px solid var(--sqlv-warning);
+}
+
+.icor-sqlv-level-swatch {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: var(--sqlv-r-micro);
+  border: 1px solid var(--sqlv-hairline);
+  background: var(--sqlv-level-color, transparent);
+}
+
+.icor-sqlv-level-color-name { min-width: 5em; color: var(--sqlv-fg-dim); font-size: 13px; }
+
+.icor-sqlv-level-color-row.is-overridden .icor-sqlv-level-color-name { color: var(--sqlv-fg); font-weight: 600; }
+
 .icor-sqlv-form select.dropdown {
   background-color: var(--sqlv-well);
   color: var(--sqlv-fg-dim);

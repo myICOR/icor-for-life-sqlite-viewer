@@ -109,7 +109,7 @@ test('numeric text is judged like a number; anything that is not a number gets n
 test('resolveLevel takes the colour from the settings; an unknown level stays neutral', () => {
   const levels = lib.normalizeLevels(undefined);
   const hit = lib.resolveLevel(99, { ranges: BANDS }, levels);
-  assert.deepEqual(unwrap(hit), { name: 'Alert', label: 'check in', color: 'var(--color-red)', known: true });
+  assert.deepEqual(unwrap(hit), { name: 'Alert', label: 'check in', color: 'var(--color-red)', known: true, overridden: false });
   const unknown = lib.resolveLevel(99, { ranges: [{ level: 'Renamed' }] }, levels);
   assert.equal(unknown.known, false);
   assert.equal(unknown.color, '');
@@ -423,4 +423,66 @@ test('without layout the fit is a no-op and the CSS clamp stands', () => {
   const caption = stat.createDiv({ cls: 'icor-sqlv-stat-caption' });
   assert.equal(lib.fitStatCaption(stat, caption), undefined);
   assert.deepEqual([...caption.classSet], ['icor-sqlv-stat-caption']);
+});
+
+/* ------------------------------------------- per-widget colour override -- */
+
+test('a per-widget colour changes only the colour; the level keeps its name', () => {
+  const levels = lib.normalizeLevels(undefined);
+  const tile = { ranges: BANDS, levelColors: { Alert: '#123456' } };
+  const hit = lib.resolveLevel(99, tile, levels);
+  assert.equal(hit.name, 'Alert');
+  assert.equal(hit.color, '#123456');
+  assert.equal(hit.overridden, true);
+  assert.equal(lib.resolveLevel(12, tile, levels).color, 'var(--color-green)', 'other levels keep the settings colour');
+  assert.equal(lib.resolveLevel(99, { ranges: BANDS, levelColors: { Alert: 'red; x' } }, levels).color, 'var(--color-red)',
+    'a broken override falls back to the settings');
+  const orphan = lib.resolveLevel(99, { ranges: [{ level: 'Gone' }], levelColors: { Gone: '#123456' } }, levels);
+  assert.equal(orphan.known, false, 'an override never revives a level the settings do not have');
+  const el = draw({ title: 'Index', viz: 'stat', ranges: BANDS, levelColors: { Alert: '#123456' } }, [[99]]);
+  assert.equal(el.style['--sqlv-level-color'], '#123456');
+  assert.match(el.getAttribute('aria-label'), /level Alert/);
+});
+
+test('the spec validator checks levelColors in plain words, and they survive the file', () => {
+  const reason = (levelColors, extra) => parse(Object.assign(statTile({ ranges: BANDS, levelColors }), extra || {})).reason;
+  assert.match(reason({ Alert: '#123456' }, { viz: 'line', x: 'a', y: 'b', ranges: undefined }), /^Tile 1: "levelColors" only work on a stat widget/);
+  assert.match(reason(['#123456']), /^Tile 1: "levelColors" must be an object like/);
+  assert.match(reason({ ' ': '#123456' }), /every name in "levelColors" must be a level name/);
+  assert.match(reason({ Alert: 'red' }), /^Tile 1: the colour for "Alert" in "levelColors" must be a theme colour like "var\(--color-red\)" or a hex colour like "#d04040"\./);
+  const ok = parse(statTile({ ranges: BANDS, levelColors: { Alert: '#123456', Good: 'var(--color-blue)' } }));
+  assert.equal(ok.ok, true, ok.reason);
+  const json = JSON.parse(lib.specToJson(ok.spec));
+  assert.deepEqual(json.tiles[0].levelColors, { Alert: '#123456', Good: 'var(--color-blue)' });
+  const built = parse({ viz: 'stat', ranges: BANDS, levelColors: { Alert: '#123456' }, source: { table: 't', metric: 'v', agg: 'avg' } });
+  assert.deepEqual(unwrap(lib.prepareTileForRender(built.spec.tiles[0], { columns: ['value'], rows: [[1]] }).spec.levelColors), { Alert: '#123456' });
+});
+
+test('the edit screen marks an overridden widget and resets it to the settings', async () => {
+  const parsed = parse(statTile({ ranges: BANDS }));
+  const { form, spec } = await makeForm(parsed.spec.tiles[0]);
+  form.open();
+  const marks = () => byClass(form.formEl, 'icor-sqlv-level-override-mark');
+  assert.equal(marks().length, 0, 'no override, no mark');
+  assert.equal(byClass(form.formEl, 'icor-sqlv-level-color-row').length, 3, 'one colour row per settings level');
+  /* Pick a theme colour for Alert on this widget only. */
+  const alertSelect = [...walkEl(form.formEl)].find((e) => e.tagName === 'SELECT' && e.getAttribute('aria-label') === 'Colour of Alert on this widget');
+  alertSelect.value = 'var(--color-purple)';
+  alertSelect.handlers.change[0]();
+  assert.equal(marks().length, 1, 'the widget is marked as changed');
+  assert.equal(marks()[0].textContent, 'Changed for this widget');
+  assert.ok(byClass(form.formEl, 'icor-sqlv-level-colors')[0].classSet.has('is-overridden'));
+  assert.deepEqual(unwrap(form.buildTile().tile.levelColors), { Alert: 'var(--color-purple)' });
+  await new Promise((r) => setTimeout(r, 500));
+  await form.save();
+  assert.deepEqual(unwrap(spec.tiles[0].levelColors), { Alert: 'var(--color-purple)' });
+
+  /* Open it again: the override is shown, and Reset clears it. */
+  const again = await makeForm(spec.tiles[0]);
+  again.form.open();
+  const reset = [...walkEl(again.form.formEl)].find((e) => e.tagName === 'BUTTON' && e.textContent === 'Reset to settings');
+  assert.ok(reset, 'an overridden widget offers the way back');
+  reset.handlers.click[0]();
+  assert.equal(byClass(again.form.formEl, 'icor-sqlv-level-override-mark').length, 0);
+  assert.equal(again.form.buildTile().tile.levelColors, undefined, 'back on the settings colours');
 });

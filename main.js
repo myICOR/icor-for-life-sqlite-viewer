@@ -507,7 +507,7 @@ function parseDashboardSpec(text) {
       }
       layout = { x: l.x, y: l.y, w: l.w, h: l.h };
     }
-    const levelCheck = checkRanges(t.ranges, t.viz, at);
+    const levelCheck = checkTileLevels(t, at);
     if (!levelCheck.ok) return levelCheck;
 
     if (t.source !== undefined) {
@@ -587,6 +587,7 @@ function parseDashboardSpec(text) {
 /* A parsed tile with its checked value levels, when it has any. */
 function withLevels(tile, levelCheck) {
   if (levelCheck.ranges) tile.ranges = levelCheck.ranges;
+  if (levelCheck.colors) tile.levelColors = levelCheck.colors;
   return tile;
 }
 
@@ -626,6 +627,7 @@ function specToJson(spec) {
         return out;
       });
     }
+    if (t.levelColors && Object.keys(t.levelColors).length) tile.levelColors = Object.assign({}, t.levelColors);
     if (t.source) {
       const s = {};
       if (t.source.database) s.database = t.source.database;
@@ -977,7 +979,7 @@ function pivotSeries(table) {
 function prepareTileForRender(tile, table) {
   if (!tile.source) return { spec: tile, table };
   if (tile.viz === 'stat') {
-    return { spec: { title: tile.title, viz: 'stat', y: ['value'], unit: tile.unit, ranges: tile.ranges }, table };
+    return { spec: { title: tile.title, viz: 'stat', y: ['value'], unit: tile.unit, ranges: tile.ranges, levelColors: tile.levelColors }, table };
   }
   if (tile.source.series) {
     const wide = pivotSeries(table);
@@ -1288,6 +1290,38 @@ function checkRanges(raw, viz, at) {
   return { ok: true, ranges: out.length ? out : undefined };
 }
 
+/* Validate a tile's "levelColors": a per-widget colour for a level. The
+ * override keeps the level's name and changes only its colour. */
+function checkLevelColors(raw, viz, at) {
+  if (raw === undefined) return { ok: true, colors: undefined };
+  if (viz !== 'stat') return { ok: false, reason: at + ': "levelColors" only work on a stat widget (One big number).' };
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, reason: at + ': "levelColors" must be an object like {"Alert": "#d04040"}.' };
+  }
+  const out = {};
+  for (const [name, color] of Object.entries(raw)) {
+    const key = name.trim();
+    if (!key || key.length > LEVEL_NAME_MAX) {
+      return { ok: false, reason: at + ': every name in "levelColors" must be a level name, like "Alert".' };
+    }
+    if (!isLevelColor(color)) {
+      return { ok: false, reason: at + ': the colour for "' + key + '" in "levelColors" must be a theme colour like "var(--color-red)" or a hex colour like "#d04040".' };
+    }
+    out[key] = color.trim();
+  }
+  return { ok: true, colors: Object.keys(out).length ? out : undefined };
+}
+
+/* Both level checks for one tile. Returns { ok, ranges, colors } or
+ * { ok, reason }. */
+function checkTileLevels(t, at) {
+  const ranges = checkRanges(t.ranges, t.viz, at);
+  if (!ranges.ok) return ranges;
+  const colors = checkLevelColors(t.levelColors, t.viz, at);
+  if (!colors.ok) return colors;
+  return { ok: true, ranges: ranges.ranges, colors: colors.colors };
+}
+
 /* The first range that holds the value, or null. Defensive on shape,
  * because a cached tile is a plain file that can be edited by hand: a
  * range with a broken bound never matches. Values arrive as numbers or
@@ -1308,15 +1342,19 @@ function levelOf(value, ranges) {
   return null;
 }
 
-/* The level a tile's value lands on, with its colour from the settings.
- * null when nothing matches; known is false when the range names a level
- * the settings do not have (the tile then stays neutral). */
+/* The level a tile's value lands on, with its colour: the widget's own
+ * override when it has one, else the settings colour. null when nothing
+ * matches; known is false when the range names a level the settings do
+ * not have (the tile then stays neutral, override or not). */
 function resolveLevel(value, tile, levels) {
   const range = levelOf(value, tile && tile.ranges);
   if (!range) return null;
   const known = Array.isArray(levels) ? levels.find((l) => l && l.name === range.level) : null;
-  const color = known && isLevelColor(known.color) ? known.color.trim() : '';
-  return { name: range.level, label: typeof range.label === 'string' ? range.label : '', color, known: !!known };
+  const own = tile.levelColors && typeof tile.levelColors === 'object' && Object.prototype.hasOwnProperty.call(tile.levelColors, range.level)
+    ? tile.levelColors[range.level] : undefined;
+  const overridden = !!known && isLevelColor(own);
+  const color = overridden ? own.trim() : (known && isLevelColor(known.color) ? known.color.trim() : '');
+  return { name: range.level, label: typeof range.label === 'string' ? range.label : '', color, known: !!known, overridden };
 }
 
 function levelLookFor(kind, looks) {
@@ -3156,6 +3194,7 @@ class WidgetFormModal extends Modal {
         level: r.level || '',
         label: r.label || '',
       })) : [],
+      levelColors: existing && existing.levelColors ? Object.assign({}, existing.levelColors) : {},
       advancedOpen: false,
     };
     this.schema = null;
@@ -3311,7 +3350,10 @@ class WidgetFormModal extends Modal {
   /* The form's range rows as checked ranges. Only a stat widget carries
    * them; the rows stay in the form if the chart type changes back. */
   levelsFromForm(viz) {
-    if (viz !== 'stat' || !this.state.ranges.length) return { ok: true, ranges: undefined };
+    if (viz !== 'stat') return { ok: true, ranges: undefined };
+    const colors = checkLevelColors(Object.keys(this.state.levelColors).length ? this.state.levelColors : undefined, viz, 'This widget');
+    if (!colors.ok) return colors;
+    if (!this.state.ranges.length) return { ok: true, ranges: undefined, colors: colors.colors };
     const raw = [];
     for (let i = 0; i < this.state.ranges.length; i++) {
       const row = this.state.ranges[i];
@@ -3325,7 +3367,9 @@ class WidgetFormModal extends Modal {
       }
       raw.push(out);
     }
-    return checkRanges(raw, viz, 'This widget');
+    const ranges = checkRanges(raw, viz, 'This widget');
+    if (!ranges.ok) return ranges;
+    return { ok: true, ranges: ranges.ranges, colors: colors.colors };
   }
 
   suggestedTitle() {
@@ -3768,6 +3812,56 @@ class WidgetFormModal extends Modal {
         this.renderForm();
         this.touch();
       });
+    }
+    this.renderLevelColors(wrap, levels);
+  }
+
+  /* A per-widget colour for a level. The level keeps its name; only the
+   * colour changes, and the form says so plainly, with a way back. */
+  renderLevelColors(wrap, levels) {
+    const s = this.state;
+    const overridden = Object.keys(s.levelColors).length > 0;
+    const box = wrap.createDiv({ cls: 'icor-sqlv-level-colors' + (overridden ? ' is-overridden' : '') });
+    const head = box.createDiv({ cls: 'icor-sqlv-level-colors-head' });
+    head.createSpan({ cls: 'icor-sqlv-field-label', text: 'Colours for this widget' });
+    if (overridden) {
+      head.createSpan({ cls: 'icor-sqlv-level-override-mark', text: 'Changed for this widget' });
+      const reset = head.createEl('button', { text: 'Reset to settings' });
+      reset.setAttribute('aria-label', 'Use the colours from the plugin settings again');
+      reset.addEventListener('click', () => { s.levelColors = {}; this.renderForm(); this.touch(); });
+    }
+    for (const level of levels) {
+      const own = s.levelColors[level.name];
+      const row = box.createDiv({ cls: 'icor-sqlv-filter-row-edit icor-sqlv-level-color-row' + (own ? ' is-overridden' : '') });
+      const swatch = row.createSpan({ cls: 'icor-sqlv-level-swatch' });
+      if (isLevelColor(own || level.color)) swatch.style.setProperty('--sqlv-level-color', (own || level.color).trim());
+      row.createSpan({ cls: 'icor-sqlv-level-color-name', text: level.name + (own ? ' (changed)' : '') });
+      const themed = !own || LEVEL_THEME_COLORS.some(([v]) => v === own);
+      const select = row.createEl('select', { cls: 'dropdown' });
+      select.setAttribute('aria-label', 'Colour of ' + level.name + ' on this widget');
+      const options = [['', 'Settings colour']].concat(LEVEL_THEME_COLORS.map(([v, text]) => [v, text + ' (theme)']), [['custom', 'Custom colour']]);
+      for (const [value, text] of options) {
+        const opt = select.createEl('option', { text });
+        opt.value = value;
+        if (value === (own ? (themed ? own : 'custom') : '')) opt.selected = true;
+      }
+      select.addEventListener('change', () => {
+        if (!select.value) delete s.levelColors[level.name];
+        else if (select.value === 'custom') s.levelColors[level.name] = own && /^#/.test(own) ? own : '#808080';
+        else s.levelColors[level.name] = select.value;
+        this.renderForm();
+        this.touch();
+      });
+      if (own && !themed) {
+        const picker = row.createEl('input', { type: 'color', value: own });
+        picker.setAttribute('aria-label', 'Custom colour of ' + level.name + ' on this widget');
+        picker.addEventListener('input', () => {
+          if (!isLevelColor(picker.value)) return;
+          s.levelColors[level.name] = picker.value;
+          swatch.style.setProperty('--sqlv-level-color', picker.value);
+          this.touch();
+        });
+      }
     }
   }
 
@@ -4856,7 +4950,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
-  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, levelOf, resolveLevel, levelLookFor,
+  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, checkLevelColors, checkTileLevels, levelOf, resolveLevel, levelLookFor,
   LEVEL_THEME_COLORS, DEFAULT_LEVELS, LEVEL_LOOKS, DEFAULT_LEVEL_LOOKS,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
