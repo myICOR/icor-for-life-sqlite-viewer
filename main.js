@@ -1458,42 +1458,82 @@ function svgEl(tag, attrs) {
   return el;
 }
 
+/* Charts are drawn to the size they are given, never stretched: the
+ * viewBox is the real width and height of the chart's box, so text keeps
+ * its size and nothing is cut by the tile edge. The box is measured, and
+ * the chart is redrawn whenever the tile resizes. Where there is nothing
+ * to measure (no layout yet, or the gates), the 640 x 260 frame stands in
+ * and scales to the width, as before. */
 const CHART_W = 640;
 const CHART_H = 260;
-const PAD = { top: 14, right: 14, bottom: 34, left: 52 };
+/* Tick labels are 10px mono: about 0.6em a character. */
+const TICK_CHAR_W = 6.2;
+/* Below these the labels step aside before anything could be cut: no
+ * x labels under CHART_MIN_X_H tall, no y labels under CHART_MIN_Y_W wide. */
+const CHART_MIN_X_H = 90;
+const CHART_MIN_Y_W = 140;
+/* The legend goes before the plot gets shorter than this. */
+const CHART_MIN_PLOT_WITH_LEGEND = 70;
 
-function chartFrame(parentEl) {
-  const svg = svgEl('svg', { viewBox: '0 0 ' + CHART_W + ' ' + CHART_H, class: 'icor-sqlv-chart', role: 'img' });
-  parentEl.appendChild(svg);
-  return svg;
+/* The frame for a W x H chart: paddings, the plot, the y scale, and
+ * which labels fit. Pure, so every size can be measured in the gates. */
+function chartLayout(W, H, lo, hi, hasXLabels) {
+  W = Math.max(1, Math.floor(W));
+  H = Math.max(1, Math.floor(H));
+  const top = 6;
+  const right = 8;
+  const showX = hasXLabels && H >= CHART_MIN_X_H;
+  const bottom = showX ? 20 : 4;
+  const plotH = Math.max(1, H - top - bottom);
+  const scale = niceScale(lo, hi, Math.max(2, Math.min(5, Math.floor(plotH / 24))));
+  const showY = W >= CHART_MIN_Y_W && plotH >= 30;
+  const yText = scale.ticks.map((t) => formatNumber(t));
+  const left = showY ? Math.ceil(Math.max(...yText.map((t) => t.length)) * TICK_CHAR_W) + 10 : 4;
+  const plotW = Math.max(1, W - left - right);
+  const yOf = (v) => top + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
+  return { W, H, top, right, bottom, left, plotW, plotH, scale, showX, showY, yOf };
 }
 
-function drawAxes(svg, scale, xLabels) {
-  const plotW = CHART_W - PAD.left - PAD.right;
-  const plotH = CHART_H - PAD.top - PAD.bottom;
-  for (const tick of scale.ticks) {
-    const y = PAD.top + plotH - ((tick - scale.min) / (scale.max - scale.min)) * plotH;
-    svg.appendChild(svgEl('line', { x1: PAD.left, y1: y, x2: PAD.left + plotW, y2: y, class: 'icor-sqlv-gridline' }));
-    const label = svgEl('text', { x: PAD.left - 6, y: y + 3, 'text-anchor': 'end', class: 'icor-sqlv-tick' });
+/* Which x labels to draw, where, and how anchored: thinned to what fits
+ * the plot width, kept inside the chart, never overlapping. */
+function xLabelPlan(L, xLabels, xOf) {
+  if (!L.showX || !xLabels.length) return [];
+  const texts = xLabels.map(shortXLabel);
+  const n = texts.length;
+  const widest = Math.max(...texts.map((t) => t.length)) * TICK_CHAR_W;
+  const fit = Math.max(1, Math.floor(L.plotW / (widest + 10)));
+  const every = Math.max(1, Math.ceil(n / Math.min(7, fit)));
+  const out = [];
+  let lastRight = -Infinity;
+  for (let i = 0; i < n; i += every) {
+    const half = (texts[i].length * TICK_CHAR_W) / 2;
+    const x = Math.min(Math.max(xOf(i), half + 1), L.W - half - 1);
+    if (x - half < lastRight + 6) continue;
+    out.push({ i, x, text: texts[i] });
+    lastRight = x + half;
+  }
+  return out;
+}
+
+function drawAxes(svg, L, xLabels, xOf) {
+  for (const tick of L.scale.ticks) {
+    const y = L.yOf(tick);
+    svg.appendChild(svgEl('line', { x1: L.left, y1: y, x2: L.left + L.plotW, y2: y, class: 'icor-sqlv-gridline' }));
+    if (!L.showY) continue;
+    const label = svgEl('text', { x: L.left - 6, y: y + 3, 'text-anchor': 'end', class: 'icor-sqlv-tick' });
     label.textContent = formatNumber(tick);
     svg.appendChild(label);
   }
   /* The baseline is the axis; it separates, it does not frame. */
   svg.appendChild(svgEl('line', {
-    x1: PAD.left, y1: PAD.top + plotH, x2: PAD.left + plotW, y2: PAD.top + plotH,
+    x1: L.left, y1: L.top + L.plotH, x2: L.left + L.plotW, y2: L.top + L.plotH,
     class: 'icor-sqlv-baseline',
   }));
-  const n = xLabels.length;
-  if (n > 0) {
-    const every = Math.max(1, Math.ceil(n / 7));
-    for (let i = 0; i < n; i += every) {
-      const x = PAD.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
-      const label = svgEl('text', { x, y: CHART_H - PAD.bottom + 16, 'text-anchor': 'middle', class: 'icor-sqlv-tick' });
-      label.textContent = shortXLabel(xLabels[i]);
-      svg.appendChild(label);
-    }
+  for (const { x, text } of xLabelPlan(L, xLabels, xOf)) {
+    const label = svgEl('text', { x: x.toFixed(1), y: L.H - L.bottom + 14, 'text-anchor': 'middle', class: 'icor-sqlv-tick' });
+    label.textContent = text;
+    svg.appendChild(label);
   }
-  return { plotW, plotH };
 }
 
 function shortXLabel(v) {
@@ -1502,14 +1542,56 @@ function shortXLabel(v) {
 }
 
 function legendFor(parentEl, names, palette) {
-  if (names.length < 2) return;
+  if (names.length < 2) return null;
   const legend = parentEl.createDiv({ cls: 'icor-sqlv-legend' });
   names.forEach((name, i) => {
     const item = legend.createSpan({ cls: 'icor-sqlv-legend-item' });
+    item.setAttribute('title', name);
     const chip = item.createSpan({ cls: 'icor-sqlv-legend-chip' });
     chip.style.background = palette[i];
-    item.createSpan({ text: name });
+    item.createSpan({ cls: 'icor-sqlv-legend-name', text: name });
   });
+  return legend;
+}
+
+/* The chart's box: a measured drawing area over a one-line legend. The
+ * legend steps aside when the plot would get too short. Redraws only when
+ * the measured size changes; stops when the tile is gone. */
+function chartBox(parentEl, names, palette, draw) {
+  const box = parentEl.createDiv({ cls: 'icor-sqlv-chart-box' });
+  const host = box.createDiv({ cls: 'icor-sqlv-chart-host' });
+  const legend = legendFor(box, names, palette);
+  let last = '';
+  const redraw = () => {
+    if (legend) {
+      legend.classList.remove('is-hidden');
+      const boxH = box.clientHeight;
+      if (boxH > 0 && boxH - (legend.offsetHeight || 0) < CHART_MIN_PLOT_WITH_LEGEND) legend.classList.add('is-hidden');
+    }
+    const w = host.clientWidth;
+    const h = host.clientHeight;
+    const measured = w > 0 && h > 0;
+    const W = measured ? Math.floor(w) : CHART_W;
+    const H = measured ? Math.floor(h) : CHART_H;
+    const key = W + 'x' + H + (measured ? '' : '?');
+    if (key === last) return;
+    last = key;
+    host.empty();
+    const attrs = { viewBox: '0 0 ' + W + ' ' + H, class: 'icor-sqlv-chart' + (measured ? ' is-measured' : ''), role: 'img' };
+    if (measured) { attrs.width = W; attrs.height = H; }
+    const svg = svgEl('svg', attrs);
+    host.appendChild(svg);
+    draw(svg, W, H);
+  };
+  redraw();
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(() => {
+      if (!box.isConnected) { observer.disconnect(); return; }
+      redraw();
+    });
+    observer.observe(box);
+  }
+  return { box, host, legend, redraw };
 }
 
 /* A bar with only its top corners rounded; square when narrow. */
@@ -1527,15 +1609,16 @@ function barPath(x, y, w, h, r) {
 
 /* The prior period as a dotted ghost, aligned point-for-point with the
  * current period. Dots mean "another time", a state, not a category. */
-function drawGhost(svg, ghost, { xOf, yOf, scale, color }) {
+function drawGhost(svg, ghost, { xOf, yOf, scale, color, top, count }) {
   if (!ghost || !ghost.rows || !ghost.rows.length) return;
   const vi = columnIndex(ghost.columns, 'value');
   if (vi < 0) return;
   let d = '';
-  ghost.rows.forEach((row, i) => {
+  /* Point for point with the current period, never past its last point. */
+  ghost.rows.slice(0, count).forEach((row, i) => {
     const v = Number(row[vi]);
     if (!Number.isFinite(v)) return;
-    const y = Math.max(PAD.top, Math.min(yOf(scale.min), yOf(v)));
+    const y = Math.max(top, Math.min(yOf(scale.min), yOf(v)));
     d += (d ? ' L ' : 'M ') + xOf(i).toFixed(1) + ' ' + y.toFixed(1);
   });
   if (!d) return;
@@ -1562,83 +1645,82 @@ function renderLineChart(parentEl, table, tile, extras) {
     const vi = columnIndex(ghost.columns || [], 'value');
     if (vi >= 0) for (const row of ghost.rows) { const v = Number(row[vi]); if (Number.isFinite(v)) values.push(v); }
   }
-  /* A snug axis: a heart rate line living between 60 and 90 should use the
-   * whole plot, not hover above an empty run down to zero. */
-  const scale = niceScale(Math.min(...values), Math.max(...values), 5);
-  const svg = chartFrame(parentEl);
-  const xLabels = table.rows.map((r) => r[xIdx]);
-  const { plotW, plotH } = drawAxes(svg, scale, xLabels);
-  const n = table.rows.length;
-  const xOf = (i) => PAD.left + (n === 1 ? plotW / 2 : (i / (n - 1)) * plotW);
-  const yOf = (v) => PAD.top + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
-
   const palette = seriesPaletteFor(seriesIdx.length);
-  seriesIdx.forEach((colIdx, s) => {
-    let d = '';
-    table.rows.forEach((row, i) => {
-      const v = Number(row[colIdx]);
-      if (!Number.isFinite(v)) return;
-      d += (d ? ' L ' : 'M ') + xOf(i).toFixed(1) + ' ' + yOf(v).toFixed(1);
-    });
-    if (!d) return;
-    /* Ruled, not drawn: this surface measures. */
-    const path = svgEl('path', { d, fill: 'none', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
-    path.setAttribute('stroke', palette[s]);
-    svg.appendChild(path);
-  });
-  if (ghost) drawGhost(svg, ghost, { xOf, yOf, scale, color: palette[0] });
-
-  /* Hover: the pen points. A solid marker guide, marker dots on the
-   * hovered points, and the values on a small chip. */
-  const guide = svgEl('line', { y1: PAD.top, y2: PAD.top + plotH, class: 'icor-sqlv-guide', visibility: 'hidden' });
-  const chip = svgEl('rect', { class: 'icor-sqlv-readout-chip', rx: 4, height: 18, visibility: 'hidden' });
-  const readout = svgEl('text', { class: 'icor-sqlv-readout', visibility: 'hidden' });
-  const dots = seriesIdx.map(() => {
-    const dot = svgEl('circle', { r: 3, class: 'icor-sqlv-hover-dot', visibility: 'hidden' });
-    svg.appendChild(dot);
-    return dot;
-  });
-  svg.appendChild(guide);
-  svg.appendChild(chip);
-  svg.appendChild(readout);
-  const hover = svgEl('rect', { x: PAD.left, y: PAD.top, width: plotW, height: plotH, fill: 'transparent' });
-  svg.appendChild(hover);
-  hover.addEventListener('mousemove', (ev) => {
-    const rect = svg.getBoundingClientRect();
-    const px = ((ev.clientX - rect.left) / rect.width) * CHART_W;
-    const i = Math.max(0, Math.min(n - 1, Math.round(((px - PAD.left) / plotW) * (n - 1))));
-    const x = xOf(i);
-    guide.setAttribute('x1', x); guide.setAttribute('x2', x); guide.setAttribute('visibility', 'visible');
-    const parts = [String(xLabels[i])];
+  const xLabels = table.rows.map((r) => r[xIdx]);
+  const n = table.rows.length;
+  chartBox(parentEl, seriesNames, palette, (svg, W, H) => {
+    /* A snug axis: a heart rate line living between 60 and 90 should use
+     * the whole plot, not hover above an empty run down to zero. */
+    const L = chartLayout(W, H, Math.min(...values), Math.max(...values), true);
+    const xOf = (i) => L.left + (n === 1 ? L.plotW / 2 : (i / (n - 1)) * L.plotW);
+    const yOf = L.yOf;
+    drawAxes(svg, L, xLabels, xOf);
     seriesIdx.forEach((colIdx, s) => {
-      const v = Number(table.rows[i][colIdx]);
-      if (Number.isFinite(v)) {
-        parts.push(seriesNames[s] + ' ' + formatNumber(v) + (tile.unit ? ' ' + tile.unit : ''));
-        dots[s].setAttribute('cx', x); dots[s].setAttribute('cy', yOf(v)); dots[s].setAttribute('visibility', 'visible');
-      } else {
-        dots[s].setAttribute('visibility', 'hidden');
-      }
+      let d = '';
+      table.rows.forEach((row, i) => {
+        const v = Number(row[colIdx]);
+        if (!Number.isFinite(v)) return;
+        d += (d ? ' L ' : 'M ') + xOf(i).toFixed(1) + ' ' + yOf(v).toFixed(1);
+      });
+      if (!d) return;
+      /* Ruled, not drawn: this surface measures. */
+      const path = svgEl('path', { d, fill: 'none', 'stroke-width': 2, 'stroke-linecap': 'round', 'stroke-linejoin': 'round' });
+      path.setAttribute('stroke', palette[s]);
+      svg.appendChild(path);
     });
-    readout.textContent = parts.join('  ·  ');
-    const flip = x > CHART_W / 2;
-    readout.setAttribute('x', flip ? x - 10 : x + 10);
-    readout.setAttribute('y', PAD.top + 12);
-    readout.setAttribute('text-anchor', flip ? 'end' : 'start');
-    readout.setAttribute('visibility', 'visible');
-    const textW = typeof readout.getComputedTextLength === 'function'
-      ? readout.getComputedTextLength() : readout.textContent.length * 6;
-    chip.setAttribute('width', Math.ceil(textW) + 12);
-    chip.setAttribute('x', flip ? x - 16 - textW : x + 4);
-    chip.setAttribute('y', PAD.top);
-    chip.setAttribute('visibility', 'visible');
+    if (ghost) drawGhost(svg, ghost, { xOf, yOf, scale: L.scale, color: palette[0], top: L.top, count: n });
+
+    /* Hover: the pen points. A solid marker guide, marker dots on the
+     * hovered points, and the values on a small chip. */
+    const guide = svgEl('line', { y1: L.top, y2: L.top + L.plotH, class: 'icor-sqlv-guide', visibility: 'hidden' });
+    const chip = svgEl('rect', { class: 'icor-sqlv-readout-chip', rx: 4, height: 18, visibility: 'hidden' });
+    const readout = svgEl('text', { class: 'icor-sqlv-readout', visibility: 'hidden' });
+    const dots = seriesIdx.map(() => {
+      const dot = svgEl('circle', { r: 3, class: 'icor-sqlv-hover-dot', visibility: 'hidden' });
+      svg.appendChild(dot);
+      return dot;
+    });
+    svg.appendChild(guide);
+    svg.appendChild(chip);
+    svg.appendChild(readout);
+    const hover = svgEl('rect', { x: L.left, y: L.top, width: L.plotW, height: L.plotH, fill: 'transparent' });
+    svg.appendChild(hover);
+    hover.addEventListener('mousemove', (ev) => {
+      const rect = svg.getBoundingClientRect();
+      const px = ((ev.clientX - rect.left) / rect.width) * W;
+      const i = Math.max(0, Math.min(n - 1, Math.round(((px - L.left) / L.plotW) * (n - 1))));
+      const x = xOf(i);
+      guide.setAttribute('x1', x); guide.setAttribute('x2', x); guide.setAttribute('visibility', 'visible');
+      const parts = [String(xLabels[i])];
+      seriesIdx.forEach((colIdx, s) => {
+        const v = Number(table.rows[i][colIdx]);
+        if (Number.isFinite(v)) {
+          parts.push(seriesNames[s] + ' ' + formatNumber(v) + (tile.unit ? ' ' + tile.unit : ''));
+          dots[s].setAttribute('cx', x); dots[s].setAttribute('cy', yOf(v)); dots[s].setAttribute('visibility', 'visible');
+        } else {
+          dots[s].setAttribute('visibility', 'hidden');
+        }
+      });
+      readout.textContent = parts.join('  ·  ');
+      const flip = x > W / 2;
+      readout.setAttribute('x', flip ? x - 10 : x + 10);
+      readout.setAttribute('y', L.top + 12);
+      readout.setAttribute('text-anchor', flip ? 'end' : 'start');
+      readout.setAttribute('visibility', 'visible');
+      const textW = typeof readout.getComputedTextLength === 'function'
+        ? readout.getComputedTextLength() : readout.textContent.length * 6;
+      chip.setAttribute('width', Math.ceil(textW) + 12);
+      chip.setAttribute('x', flip ? x - 16 - textW : x + 4);
+      chip.setAttribute('y', L.top);
+      chip.setAttribute('visibility', 'visible');
+    });
+    hover.addEventListener('mouseleave', () => {
+      guide.setAttribute('visibility', 'hidden');
+      chip.setAttribute('visibility', 'hidden');
+      readout.setAttribute('visibility', 'hidden');
+      for (const dot of dots) dot.setAttribute('visibility', 'hidden');
+    });
   });
-  hover.addEventListener('mouseleave', () => {
-    guide.setAttribute('visibility', 'hidden');
-    chip.setAttribute('visibility', 'hidden');
-    readout.setAttribute('visibility', 'hidden');
-    for (const dot of dots) dot.setAttribute('visibility', 'hidden');
-  });
-  legendFor(parentEl, seriesNames, palette);
 }
 
 function renderBarChart(parentEl, table, tile, extras) {
@@ -1656,66 +1738,63 @@ function renderBarChart(parentEl, table, tile, extras) {
   } else {
     for (const row of table.rows) for (const i of seriesIdx) top = Math.max(top, Number(row[i]) || 0);
   }
-  const scale = niceScale(0, top, 5);
-  const svg = chartFrame(parentEl);
   const xLabels = table.rows.map((r) => r[xIdx]);
-  const { plotW, plotH } = drawAxes(svg, scale, xLabels);
   const n = table.rows.length;
-  const slot = plotW / n;
-  const gap = Math.min(4, slot * 0.2);
-  const yOf = (v) => PAD.top + plotH - ((v - scale.min) / (scale.max - scale.min)) * plotH;
   const titleOf = (rowI, s, v) =>
     String(xLabels[rowI]) + ' · ' + seriesNames[s] + ' ' + formatNumber(v) + (tile.unit ? ' ' + tile.unit : '');
-
   const palette = seriesPaletteFor(seriesIdx.length);
   const ghost = extras && extras.ghost;
-  if (stacked) {
-    const stacks = stackRows(table.rows, seriesIdx);
-    stacks.forEach((segs, rowI) => {
-      const x = PAD.left + rowI * slot + gap / 2;
-      const w = Math.max(1, slot - gap);
-      segs.forEach(([lo, hi], s) => {
-        if (hi <= lo) return;
-        /* Segments separated by 1px of tile ground, not by stroke. */
-        const yTop = yOf(hi);
-        const pixelH = Math.max(0.5, yOf(lo) - yTop - (s < segs.length - 1 ? 0 : 0));
-        const isTopmost = segs.slice(s + 1).every(([l2, h2]) => h2 <= l2);
-        const inset = isTopmost ? 0 : 1;
-        const bar = svgEl('rect', {
-          x: x.toFixed(1), y: (yTop + inset).toFixed(1),
-          width: w.toFixed(1), height: Math.max(0.5, pixelH - inset).toFixed(1),
+  chartBox(parentEl, seriesNames, palette, (svg, W, H) => {
+    const L = chartLayout(W, H, 0, top, true);
+    const slot = L.plotW / n;
+    const gap = Math.min(4, slot * 0.2);
+    const yOf = L.yOf;
+    const xOfBar = (i) => L.left + i * slot + slot / 2;
+    drawAxes(svg, L, xLabels, xOfBar);
+    if (stacked) {
+      const stacks = stackRows(table.rows, seriesIdx);
+      stacks.forEach((segs, rowI) => {
+        const x = L.left + rowI * slot + gap / 2;
+        const w = Math.max(0.5, slot - gap);
+        segs.forEach(([lo, hi], s) => {
+          if (hi <= lo) return;
+          /* Segments separated by 1px of tile ground, not by stroke. */
+          const yTop = yOf(hi);
+          const pixelH = Math.max(0.5, yOf(lo) - yTop);
+          const isTopmost = segs.slice(s + 1).every(([l2, h2]) => h2 <= l2);
+          const inset = isTopmost ? 0 : 1;
+          const bar = svgEl('rect', {
+            x: x.toFixed(1), y: (yTop + inset).toFixed(1),
+            width: w.toFixed(1), height: Math.max(0.5, pixelH - inset).toFixed(1),
+          });
+          bar.setAttribute('fill', palette[s]);
+          const t = svgEl('title', {});
+          t.textContent = titleOf(rowI, s, hi - lo);
+          bar.appendChild(t);
+          svg.appendChild(bar);
         });
-        bar.setAttribute('fill', palette[s]);
-        const t = svgEl('title', {});
-        t.textContent = titleOf(rowI, s, hi - lo);
-        bar.appendChild(t);
-        svg.appendChild(bar);
       });
-    });
-  } else {
-    const inner = Math.max(1, (slot - gap) / seriesIdx.length);
-    /* Flat tops when narrow, a 4px round at wide bars. */
-    const r = inner >= 8 ? Math.min(4, inner / 2) : 0;
-    table.rows.forEach((row, rowI) => {
-      seriesIdx.forEach((colIdx, s) => {
-        const v = Number(row[colIdx]) || 0;
-        if (v <= 0) return;
-        const x = PAD.left + rowI * slot + gap / 2 + s * inner;
-        const h = Math.max(0.5, yOf(0) - yOf(v));
-        const bar = svgEl('path', { d: barPath(x, yOf(v), inner, h, r) });
-        bar.setAttribute('fill', palette[s]);
-        const t = svgEl('title', {});
-        t.textContent = titleOf(rowI, s, v);
-        bar.appendChild(t);
-        svg.appendChild(bar);
+    } else {
+      const inner = Math.max(0.5, (slot - gap) / seriesIdx.length);
+      /* Flat tops when narrow, a 4px round at wide bars. */
+      const r = inner >= 8 ? Math.min(4, inner / 2) : 0;
+      table.rows.forEach((row, rowI) => {
+        seriesIdx.forEach((colIdx, s) => {
+          const v = Number(row[colIdx]) || 0;
+          if (v <= 0) return;
+          const x = L.left + rowI * slot + gap / 2 + s * inner;
+          const h = Math.max(0.5, yOf(0) - yOf(v));
+          const bar = svgEl('path', { d: barPath(x, yOf(v), inner, h, r) });
+          bar.setAttribute('fill', palette[s]);
+          const t = svgEl('title', {});
+          t.textContent = titleOf(rowI, s, v);
+          bar.appendChild(t);
+          svg.appendChild(bar);
+        });
       });
-    });
-  }
-  if (ghost) {
-    const xOfBar = (i) => PAD.left + i * slot + slot / 2;
-    drawGhost(svg, ghost, { xOf: xOfBar, yOf, scale, color: 'var(--sqlv-fg-dim)' });
-  }
-  legendFor(parentEl, seriesNames, palette);
+    }
+    if (ghost) drawGhost(svg, ghost, { xOf: xOfBar, yOf, scale: L.scale, color: 'var(--sqlv-fg-dim)', top: L.top, count: n });
+  });
 }
 
 function renderStatTile(parentEl, table, tile, extras) {
@@ -1765,7 +1844,10 @@ function renderResultTable(parentEl, table, { maxRows } = {}) {
 }
 
 function renderTile(tileEl, tileSpec, table, extras) {
-  if (tileSpec.title) tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
+  if (tileSpec.title) {
+    const title = tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
+    title.setAttribute('title', tileSpec.title);
+  }
   const body = tileEl.createDiv({ cls: 'icor-sqlv-tile-body' });
   if (tileSpec.viz === 'stat') renderStatTile(body, table, tileSpec, extras);
   else if (tileSpec.viz === 'line') renderLineChart(body, table, tileSpec, extras);
@@ -2630,7 +2712,8 @@ class SqliteDashboardsView extends ItemView {
         try {
           const prepared = prepareTileForRender(cachedTile, { columns: cachedTile.columns, rows: cachedTile.rows });
           renderTile(tileEl, prepared.spec, prepared.table, { ghost: cachedTile.ghost || null, compare: cachedTile.compare, favorable: cachedTile.favorable });
-          tileEl.createDiv({ cls: 'icor-sqlv-note', text: 'Computed on desktop, ' + relativeTime(cache.computedAt) + '.' });
+          const cacheNote = 'Computed on desktop, ' + relativeTime(cache.computedAt) + '.';
+          tileEl.createDiv({ cls: 'icor-sqlv-note icor-sqlv-cache-note', text: cacheNote }).setAttribute('title', cacheNote);
           fromCache++;
         } catch (e) {
           failed++;
@@ -4295,6 +4378,7 @@ IcorSqliteViewerPlugin.lib = {
   findSpot, packLayout, normalizeLayout, showAddTile, seriesPaletteFor, barPath,
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
+  chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,

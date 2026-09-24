@@ -649,6 +649,49 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
 
 .icor-sqlv-chart { width: 100%; height: auto; display: block; }
 
+/* A chart fills its tile body: a measured drawing area over a one-line
+ * legend. The chart is drawn to the area's own pixel size, so it never
+ * reaches past the tile edge. */
+.icor-sqlv-chart-box {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.icor-sqlv-chart-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.icor-sqlv-chart-host > .icor-sqlv-chart.is-measured {
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+
+/* The form's preview tile sizes to its content, so its chart area keeps
+ * the old proportions instead of collapsing. */
+.icor-sqlv-tile.is-preview .icor-sqlv-chart-host { flex: none; aspect-ratio: 64 / 26; }
+
+/* Every tile title is one line; the full text shows on hover. */
+.icor-sqlv-tile > .icor-sqlv-tile-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The phone's "Computed on desktop" line stays one line in any tile. */
+.icor-sqlv-tile > .icor-sqlv-cache-note {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .icor-sqlv-tile .icor-sqlv-table-scroll { max-height: 100%; }
 
 .icor-sqlv-chart line,
@@ -688,7 +731,9 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
 
 .icor-sqlv-legend {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  min-width: 0;
   gap: var(--sqlv-s1) var(--sqlv-s3);
   margin-top: var(--sqlv-s2);
   font-family: var(--sqlv-font-mono);
@@ -697,7 +742,13 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
   flex: 0 0 auto;
 }
 
-.icor-sqlv-legend-item { display: inline-flex; align-items: center; gap: var(--sqlv-s1); }
+.icor-sqlv-legend-item { display: inline-flex; align-items: center; gap: var(--sqlv-s1); flex: 0 1 auto; min-width: 0; }
+
+.icor-sqlv-legend-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+
+.icor-sqlv-legend-chip { flex: 0 0 auto; }
+
+.icor-sqlv-legend.is-hidden { display: none; }
 
 .icor-sqlv-legend-chip {
   width: 10px;

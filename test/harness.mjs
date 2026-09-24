@@ -113,7 +113,7 @@ export function makeObsidian({ desktop = true } = {}) {
  * the gates, and a `makePlugin(app)` that constructs an instance.
  * `sourceOverride` loads a mutated copy of main.js instead, so a gate can
  * prove its guard owns the refusal rather than passing vacuously. */
-export function loadPlugin({ desktop = true, sourceOverride = null } = {}) {
+export function loadPlugin({ desktop = true, sourceOverride = null, globals = {} } = {}) {
   const obsidian = makeObsidian({ desktop });
   const body = makeEl('body');
   const doc = {
@@ -133,6 +133,8 @@ export function loadPlugin({ desktop = true, sourceOverride = null } = {}) {
     /* What sql-wasm.js needs when the wasm gate loads it for real. */
     WebAssembly, TextDecoder, TextEncoder, performance,
   };
+  /* Extra globals a gate needs, e.g. a fake ResizeObserver. */
+  Object.assign(sandbox, globals);
   sandbox.globalThis = sandbox;
   vm.createContext(sandbox);
   vm.runInContext(sourceOverride || source, sandbox, { filename: 'main.js' });
