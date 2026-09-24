@@ -1446,3 +1446,36 @@ button.icor-sqlv-advanced-toggle:focus-visible { outline: 2px solid var(--sqlv-m
   .icor-sqlv-edit-toggle { min-height: 44px; }
   .icor-sqlv-tabs button { min-height: 44px; }
 }
+
+/* ----------------------------------------- change over the period (chart) -- */
+
+/* A chart's title row can carry its change over the period at the right,
+ * styled like the stat caption. The title gives way first (ellipsis); the
+ * change stays whole on one line. */
+.icor-sqlv-tile-titlebar {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sqlv-s2);
+  min-width: 0;
+  flex: 0 0 auto;
+  margin-bottom: var(--sqlv-s3);
+}
+
+.icor-sqlv-tile-titlebar > .icor-sqlv-tile-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icor-sqlv-head-delta {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  color: var(--sqlv-fg-dim);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}

@@ -527,7 +527,9 @@ function parseDashboardSpec(text) {
       if (favorable !== 'up' && favorable !== 'down') {
         return { ok: false, reason: at + ': "favorable" must be "up" or "down" (which direction counts as good).' };
       }
-      tiles.push(withLevels({
+      const builtDelta = checkHeaderDelta(t, t.viz, t.source.series ? 2 : 1, at);
+      if (!builtDelta.ok) return builtDelta;
+      tiles.push(withHeaderDelta(withLevels({
         title: typeof t.title === 'string' ? t.title : '',
         viz: t.viz,
         unit: typeof t.unit === 'string' ? t.unit : '',
@@ -546,7 +548,7 @@ function parseDashboardSpec(text) {
           timeColumn: t.source.timeColumn || undefined,
           timeframe: t.source.timeframe === undefined ? 'global' : t.source.timeframe,
         },
-      }, levelCheck));
+      }, levelCheck), builtDelta));
       continue;
     }
 
@@ -561,7 +563,9 @@ function parseDashboardSpec(text) {
       if (typeof t.x !== 'string' || !t.x) return { ok: false, reason: at + ' needs an "x" column for a ' + t.viz + ' chart.' };
       if (y.length === 0) return { ok: false, reason: at + ' needs a "y" column for a ' + t.viz + ' chart.' };
     }
-    tiles.push(withLevels({
+    const sqlDelta = checkHeaderDelta(t, t.viz, y.length, at);
+    if (!sqlDelta.ok) return sqlDelta;
+    tiles.push(withHeaderDelta(withLevels({
       title: typeof t.title === 'string' ? t.title : '',
       sql: t.sql,
       viz: t.viz,
@@ -570,7 +574,7 @@ function parseDashboardSpec(text) {
       unit: typeof t.unit === 'string' ? t.unit : '',
       stack: t.stack === true,
       layout,
-    }, levelCheck));
+    }, levelCheck), sqlDelta));
   }
   return {
     ok: true,
@@ -582,6 +586,35 @@ function parseDashboardSpec(text) {
       tiles,
     },
   };
+}
+
+/* The change over the period, shown at the right of a chart's title row.
+ * Opt-in per tile; only a line or bar chart with one series has a single
+ * line to measure. Returns { ok, on, days } or { ok, reason }. */
+const HEADER_DELTA_MAX_DAYS = 365;
+
+function checkHeaderDelta(t, viz, seriesCount, at) {
+  const on = t.headerDelta;
+  const days = t.headerDeltaAverageDays;
+  if (on !== undefined && typeof on !== 'boolean') return { ok: false, reason: at + ': "headerDelta" must be true or false.' };
+  if (on === true && (viz !== 'line' && viz !== 'bar' || seriesCount !== 1)) {
+    return { ok: false, reason: at + ': "headerDelta" only works on a line or bar chart with one series.' };
+  }
+  if (days !== undefined) {
+    if (on !== true) return { ok: false, reason: at + ': "headerDeltaAverageDays" needs "headerDelta": true.' };
+    if (!Number.isInteger(days) || days < 1 || days > HEADER_DELTA_MAX_DAYS) {
+      return { ok: false, reason: at + ': "headerDeltaAverageDays" must be a whole number of days from 1 to ' + HEADER_DELTA_MAX_DAYS + '.' };
+    }
+  }
+  return { ok: true, on: on === true, days: on === true ? days : undefined };
+}
+
+function withHeaderDelta(tile, check) {
+  if (check.on) {
+    tile.headerDelta = true;
+    if (check.days !== undefined) tile.headerDeltaAverageDays = check.days;
+  }
+  return tile;
 }
 
 /* A parsed tile with its checked value levels, when it has any. */
@@ -625,6 +658,10 @@ function specToJson(spec) {
         if (r.label) out.label = r.label;
         return out;
       });
+    }
+    if (t.headerDelta === true) {
+      tile.headerDelta = true;
+      if (t.headerDeltaAverageDays !== undefined) tile.headerDeltaAverageDays = t.headerDeltaAverageDays;
     }
     if (t.source) {
       const s = {};
@@ -986,7 +1023,10 @@ function prepareTileForRender(tile, table) {
       table: wide,
     };
   }
-  return { spec: { title: tile.title, viz: tile.viz, x: 'x', y: ['value'], unit: tile.unit, stack: false }, table };
+  return {
+    spec: { title: tile.title, viz: tile.viz, x: 'x', y: ['value'], unit: tile.unit, stack: false, headerDelta: tile.headerDelta, headerDeltaAverageDays: tile.headerDeltaAverageDays },
+    table,
+  };
 }
 
 /* Validate one structured source. Returns { ok } or { ok, reason }. */
@@ -1201,6 +1241,61 @@ function deltaBadge(current, previous, favorable) {
   }
   const good = direction === 'flat' ? null : (direction === (favorable === 'down' ? 'down' : 'up'));
   return { direction, label, good, diff };
+}
+
+/* ---------------------------------------------- change over the period -- */
+
+/* How much a chart's one series moved over what it shows: the last end
+ * minus the first. With averageDays, each end is the average of the
+ * points within the first and the last N days of the plotted dates (a
+ * weekly average instead of one noisy day); without it, or when the x
+ * values are not dates, the first and last plotted points. One decimal,
+ * the same diagonal arrows as the stat chips, a typographic minus. Pure;
+ * null when there is nothing to compare. */
+function headerDeltaOf(table, tile) {
+  const xIdx = columnIndex(table.columns, tile.x);
+  const yName = tile.y && tile.y.length ? tile.y[0] : '';
+  const yIdx = columnIndex(table.columns, yName);
+  if (xIdx < 0 || yIdx < 0) return null;
+  const points = [];
+  for (const row of table.rows) {
+    const v = row[yIdx];
+    if (v === null || v === undefined || v === '' || typeof v === 'boolean') continue;
+    const n = Number(v);
+    if (Number.isFinite(n)) points.push({ x: row[xIdx], v: n });
+  }
+  if (points.length < 2) return null;
+  const dayOf = (x) => {
+    const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(x === null || x === undefined ? '' : x));
+    return m ? Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 86400000 : null;
+  };
+  const days = tile.headerDeltaAverageDays;
+  let first;
+  let last;
+  const days0 = points.map((p) => dayOf(p.x));
+  if (Number.isInteger(days) && days > 0 && days0.every((d) => d !== null)) {
+    const lo = Math.min(...days0);
+    const hi = Math.max(...days0);
+    const end = (pick) => {
+      const chosen = points.map((p, i) => ({ p, d: days0[i] })).filter((e) => pick(e.d)).sort((x, y) => x.d - y.d);
+      return {
+        v: chosen.reduce((sum, e) => sum + e.p.v, 0) / chosen.length,
+        from: chosen[0].p.x, to: chosen[chosen.length - 1].p.x, count: chosen.length,
+      };
+    };
+    first = end((d) => d < lo + days);
+    last = end((d) => d > hi - days);
+  } else {
+    first = { v: points[0].v, from: points[0].x, to: points[0].x, count: 1 };
+    last = { v: points[points.length - 1].v, from: points[points.length - 1].x, to: points[points.length - 1].x, count: 1 };
+  }
+  const diff = Math.round((last.v - first.v) * 10) / 10;
+  const direction = diff > 0 ? 'up' : (diff < 0 ? 'down' : 'flat');
+  const unit = tile.unit ? ' ' + tile.unit : '';
+  const arrow = direction === 'up' ? '\u2197 +' : (direction === 'down' ? '\u2198 \u2212' : '\u2192 \u00b1');
+  const text = arrow + Math.abs(diff).toFixed(1) + unit;
+  const endText = (e) => e.v.toFixed(1) + unit + ' (' + (e.count > 1 ? 'average of ' + e.count + ', ' + e.from + ' to ' + e.to : String(e.from)) + ')';
+  return { diff, direction, text, first, last, hover: 'From ' + endText(first) + ' to ' + endText(last) };
 }
 
 /* ------------------------------------------------------- value levels -- */
@@ -2106,7 +2201,16 @@ function renderTile(tileEl, tileSpec, table, extras) {
     applyLevel(tileEl, level && shown ? Object.assign({ shown }, level) : null, 'stat', tileSpec, extras);
     return;
   }
-  if (tileSpec.title) {
+  /* A chart may show its change over the period at the right of its
+   * title row; the title ellipsizes before the change gives way. */
+  const delta = tileSpec.headerDelta === true && (tileSpec.viz === 'line' || tileSpec.viz === 'bar') ? headerDeltaOf(table, tileSpec) : null;
+  if (delta) {
+    const bar = tileEl.createDiv({ cls: 'icor-sqlv-tile-titlebar' });
+    if (tileSpec.title) bar.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title }).setAttribute('title', tileSpec.title);
+    const chip = bar.createSpan({ cls: 'icor-sqlv-head-delta is-' + delta.direction, text: delta.text });
+    chip.setAttribute('title', delta.hover);
+    chip.setAttribute('aria-label', 'Change over the period: ' + delta.text + '. ' + delta.hover);
+  } else if (tileSpec.title) {
     const title = tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
     title.setAttribute('title', tileSpec.title);
   }
@@ -3156,6 +3260,8 @@ class WidgetFormModal extends Modal {
         level: r.level || '',
         label: r.label || '',
       })) : [],
+      headerDelta: !!(existing && existing.headerDelta === true),
+      headerDeltaAverageDays: existing && existing.headerDeltaAverageDays !== undefined ? String(existing.headerDeltaAverageDays) : '',
       advancedOpen: false,
     };
     this.schema = null;
@@ -3264,7 +3370,9 @@ class WidgetFormModal extends Modal {
       }
       const levels = this.levelsFromForm(tile.viz);
       if (!levels.ok) return levels;
-      return { ok: true, tile: withLevels(tile, levels) };
+      const sqlDelta = this.headerDeltaFromForm(tile.viz, y.length);
+      if (!sqlDelta.ok) return sqlDelta;
+      return { ok: true, tile: withHeaderDelta(withLevels(tile, levels), sqlDelta) };
     }
     if (!s.database) return { ok: false, reason: 'Pick a database first.' };
     if (!s.table) return { ok: false, reason: 'Pick a table.' };
@@ -3305,7 +3413,46 @@ class WidgetFormModal extends Modal {
     source.filters = check.filters;
     const levels = this.levelsFromForm(viz);
     if (!levels.ok) return levels;
-    return { ok: true, tile: withLevels(tile, levels) };
+    const builtDelta = this.headerDeltaFromForm(viz, s.series ? 2 : 1);
+    if (!builtDelta.ok) return builtDelta;
+    return { ok: true, tile: withHeaderDelta(withLevels(tile, levels), builtDelta) };
+  }
+
+  /* The change-over-the-period fields as a checked setting. They apply
+   * only to a one-series line or bar chart and stay in the form if the
+   * chart type changes. */
+  headerDeltaFromForm(viz, seriesCount) {
+    const s = this.state;
+    if (!s.headerDelta || (viz !== 'line' && viz !== 'bar') || seriesCount !== 1) return { ok: true, on: false };
+    const text = String(s.headerDeltaAverageDays || '').trim();
+    const raw = { headerDelta: true };
+    if (text) {
+      const n = Number(text);
+      if (!Number.isInteger(n)) return { ok: false, reason: 'Average the ends over N days: N must be a whole number of days.' };
+      raw.headerDeltaAverageDays = n;
+    }
+    return checkHeaderDelta(raw, viz, 1, 'This widget');
+  }
+
+  renderHeaderDeltaFields(form, viz, seriesCount) {
+    if ((viz !== 'line' && viz !== 'bar') || seriesCount !== 1) return;
+    const s = this.state;
+    const row = form.createDiv({ cls: 'icor-sqlv-wizard-toggle' });
+    const cb = row.createEl('input', { type: 'checkbox' });
+    cb.checked = s.headerDelta;
+    cb.setAttribute('id', 'icor-sqlv-header-delta');
+    cb.setAttribute('aria-label', 'Show change over the period');
+    const lbl = row.createEl('label', { text: 'Show change over the period' });
+    lbl.setAttribute('for', 'icor-sqlv-header-delta');
+    cb.addEventListener('change', () => { s.headerDelta = cb.checked; this.renderForm(); this.touch(); });
+    if (s.headerDelta) {
+      const input = this.textInput(form, {
+        label: 'Average the ends over N days', optional: true, value: s.headerDeltaAverageDays,
+        placeholder: 'empty: first and last point',
+        onInput: (v) => { s.headerDeltaAverageDays = v; this.touch(); },
+      });
+      input.setAttribute('inputmode', 'numeric');
+    }
   }
 
   /* The form's range rows as checked ranges. Only a stat widget carries
@@ -3587,6 +3734,7 @@ class WidgetFormModal extends Modal {
       }
 
       this.renderRanges(form, s.agg === 'latest' ? 'stat' : s.viz);
+      this.renderHeaderDeltaFields(form, s.agg === 'latest' ? 'stat' : s.viz, s.series ? 2 : 1);
 
       this.nativeSelect(form, {
         label: 'Size', options: [['', 'Keep as is']].concat(Object.entries(SIZE_PRESETS).map(([k, p]) => [k, p.label])).slice(this.editIndex >= 0 ? 0 : 1),
@@ -3836,6 +3984,7 @@ class WidgetFormModal extends Modal {
       onInput: (v) => { s.unit = v; this.touch(); },
     });
     this.renderRanges(form, s.viz);
+    this.renderHeaderDeltaFields(form, s.viz, s.y.split(',').map((v) => v.trim()).filter(Boolean).length);
     this.nativeSelect(form, {
       label: 'Size', options: [['', 'Keep as is']].concat(Object.entries(SIZE_PRESETS).map(([k, p]) => [k, p.label])).slice(this.editIndex >= 0 ? 0 : 1),
       value: s.sizeKey,
@@ -4856,6 +5005,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
+  headerDeltaOf, checkHeaderDelta,
   fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, levelOf, resolveLevel, levelLookFor,
   LEVEL_THEME_COLORS, DEFAULT_LEVELS, LEVEL_LOOKS, DEFAULT_LEVEL_LOOKS,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
