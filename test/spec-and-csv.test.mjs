@@ -66,7 +66,7 @@ test('a line or bar tile without x or y is refused; a stat without either is fin
 
 test('an unknown viz is refused', () => {
   const bad = goodSpec(); bad.tiles[0].viz = 'pie';
-  assert.match(lib.parseDashboardSpec(JSON.stringify(bad)).reason, /line, bar, stat or table/);
+  assert.match(lib.parseDashboardSpec(JSON.stringify(bad)).reason, /line, bar, stat, table or divider/);
 });
 
 test('the three starter dashboards pass their own parser', () => {
