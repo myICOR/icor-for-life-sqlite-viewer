@@ -2882,6 +2882,7 @@ class WidgetFormModal extends Modal {
     };
     this.schema = null;
     this.schemaFor = '';
+    this.schemaError = '';
     this.openPicker = '';
     this.previewState = 'stale';
     this.previewError = '';
@@ -2910,6 +2911,23 @@ class WidgetFormModal extends Modal {
     cancel.addEventListener('click', () => this.close());
     this.renderForm();
     this.touch();
+    this.loadSchemaForEdit();
+  }
+
+  /* Editing a built widget: its table is already chosen, so load that
+   * table's columns now. The fields after Table (value, name, chart type,
+   * unit ...) are drawn from them; before this, they only appeared once
+   * the member reopened the Table picker. */
+  async loadSchemaForEdit() {
+    const s = this.state;
+    if (s.mode !== 'form' || !s.database || !s.table || this.tableInfo()) return;
+    try {
+      await this.ensureSchema();
+      this.schemaError = '';
+    } catch (e) {
+      this.schemaError = e.message;
+    }
+    if (this.formEl) this.renderForm();
   }
 
   onClose() {
@@ -3287,6 +3305,21 @@ class WidgetFormModal extends Modal {
       });
 
       this.renderAdvanced(form);
+    } else if (s.table) {
+      /* The table's columns are loading, or cannot be read on this
+       * device: the fields that need no columns stay editable, so a
+       * widget can always be renamed. */
+      form.createDiv({ cls: 'icor-sqlv-note', text: this.schemaError
+        ? 'The columns of ' + s.table + ' cannot be read here: ' + this.schemaError + ' The name and unit can still be changed.'
+        : 'Loading the columns of ' + s.table + ' …' });
+      this.textInput(form, {
+        label: 'Widget name', value: s.title, placeholder: this.suggestedTitle(),
+        onInput: (v) => { s.title = v; this.touch(); },
+      });
+      this.textInput(form, {
+        label: 'Unit', optional: true, value: s.unit, placeholder: 'kg, steps, kcal …',
+        onInput: (v) => { s.unit = v; this.touch(); },
+      });
     }
   }
 
