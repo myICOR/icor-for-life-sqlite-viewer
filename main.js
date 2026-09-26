@@ -1554,10 +1554,21 @@ function legendFor(parentEl, names, palette) {
   return legend;
 }
 
+/* A ResizeObserver built from the element's own window. Obsidian gives
+ * every node `win`, which in a popout is the popout's window; the main
+ * window's constructor may deliver late or never there. The global is the
+ * fallback. Null when there is no ResizeObserver at all. */
+function resizeObserverFor(el, callback) {
+  const win = el && el.win;
+  const Ctor = (win && win.ResizeObserver) || (typeof ResizeObserver !== 'undefined' ? ResizeObserver : null);
+  return Ctor ? new Ctor(callback) : null;
+}
+
 /* The chart's box: a measured drawing area over a one-line legend. The
  * legend steps aside when the plot would get too short. Redraws only when
- * the measured size changes; stops when the tile is gone. */
-function chartBox(parentEl, names, palette, draw) {
+ * the measured size changes; stops when the tile is gone. `observers`, when
+ * given, collects the box's observer so its owner can disconnect it. */
+function chartBox(parentEl, names, palette, draw, observers) {
   const box = parentEl.createDiv({ cls: 'icor-sqlv-chart-box' });
   const host = box.createDiv({ cls: 'icor-sqlv-chart-host' });
   const legend = legendFor(box, names, palette);
@@ -1584,12 +1595,13 @@ function chartBox(parentEl, names, palette, draw) {
     draw(svg, W, H);
   };
   redraw();
-  if (typeof ResizeObserver !== 'undefined') {
-    const observer = new ResizeObserver(() => {
-      if (!box.isConnected) { observer.disconnect(); return; }
-      redraw();
-    });
+  const observer = resizeObserverFor(box, () => {
+    if (!box.isConnected) { observer.disconnect(); return; }
+    redraw();
+  });
+  if (observer) {
     observer.observe(box);
+    if (observers) observers.push(observer);
   }
   return { box, host, legend, redraw };
 }
@@ -1720,7 +1732,7 @@ function renderLineChart(parentEl, table, tile, extras) {
       readout.setAttribute('visibility', 'hidden');
       for (const dot of dots) dot.setAttribute('visibility', 'hidden');
     });
-  });
+  }, extras && extras.observers);
 }
 
 function renderBarChart(parentEl, table, tile, extras) {
@@ -1794,7 +1806,7 @@ function renderBarChart(parentEl, table, tile, extras) {
       });
     }
     if (ghost) drawGhost(svg, ghost, { xOf: xOfBar, yOf, scale: L.scale, color: 'var(--sqlv-fg-dim)', top: L.top, count: n });
-  });
+  }, extras && extras.observers);
 }
 
 function renderStatTile(parentEl, table, tile, extras) {
@@ -2249,6 +2261,8 @@ class SqliteDashboardsView extends ItemView {
     this.editMode = false;
     this.gridState = null;
     this.gridRO = null;
+    /* Every chart tile's ResizeObserver, disconnected on redraw and close. */
+    this.tileROs = [];
     this.dragging = false;
   }
 
@@ -2302,6 +2316,7 @@ class SqliteDashboardsView extends ItemView {
 
   render() {
     const root = this.contentEl;
+    this.releaseTileObservers();
     root.empty();
     root.addClass('icor-sqlv-root');
     /* INKLINE's plugin-owned control boundary: inside a subtree carrying
@@ -2381,8 +2396,8 @@ class SqliteDashboardsView extends ItemView {
 
   watchGridWidth() {
     if (this.gridRO) { this.gridRO.disconnect(); this.gridRO = null; }
-    if (typeof ResizeObserver === 'undefined' || !this.gridState) return;
-    this.gridRO = new ResizeObserver(() => {
+    if (!this.gridState) return;
+    this.gridRO = resizeObserverFor(this.gridState.grid, () => {
       const gs = this.gridState;
       if (!gs || this.dragging) return;
       const cols = colsForWidth(gs.grid.clientWidth || 1080);
@@ -2392,11 +2407,17 @@ class SqliteDashboardsView extends ItemView {
       this.applyGridDisplay();
       this.placeAddTile();
     });
-    this.gridRO.observe(this.gridState.grid);
+    if (this.gridRO) this.gridRO.observe(this.gridState.grid);
+  }
+
+  releaseTileObservers() {
+    for (const observer of this.tileROs) observer.disconnect();
+    this.tileROs = [];
   }
 
   async onClose() {
     if (this.gridRO) { this.gridRO.disconnect(); this.gridRO = null; }
+    this.releaseTileObservers();
   }
 
   applyGridDisplay(preview) {
@@ -2696,7 +2717,7 @@ class SqliteDashboardsView extends ItemView {
             ghost = { columns: ghostRes.columns, rows: ghostRes.rows };
           }
           const prepared = prepareTileForRender(tile, res);
-          renderTile(tileEl, prepared.spec, prepared.table, { ghost, compare: tile.compare, favorable: tile.favorable });
+          renderTile(tileEl, prepared.spec, prepared.table, { ghost, compare: tile.compare, favorable: tile.favorable, observers: this.tileROs });
           cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows, ghost }));
           this.plugin.maybeWriteCatalog(db);
         } catch (e) {
@@ -2711,7 +2732,7 @@ class SqliteDashboardsView extends ItemView {
       if (cachedTile) {
         try {
           const prepared = prepareTileForRender(cachedTile, { columns: cachedTile.columns, rows: cachedTile.rows });
-          renderTile(tileEl, prepared.spec, prepared.table, { ghost: cachedTile.ghost || null, compare: cachedTile.compare, favorable: cachedTile.favorable });
+          renderTile(tileEl, prepared.spec, prepared.table, { ghost: cachedTile.ghost || null, compare: cachedTile.compare, favorable: cachedTile.favorable, observers: this.tileROs });
           const cacheNote = 'Computed on desktop, ' + relativeTime(cache.computedAt) + '.';
           tileEl.createDiv({ cls: 'icor-sqlv-note icor-sqlv-cache-note', text: cacheNote }).setAttribute('title', cacheNote);
           fromCache++;
