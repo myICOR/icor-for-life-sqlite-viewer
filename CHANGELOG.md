@@ -4,6 +4,34 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.1] - 2026-09-26
+
+### Fixed
+- **Charts fit their tile.** Line and bar charts were drawn in a fixed
+  640 x 260 frame and stretched to the tile's width, so a wide, short tile
+  cut off the bottom of the chart. A chart is now drawn to the measured
+  size of its tile and redrawn when the tile is resized. When space is
+  short, date labels thin out, dates and values step aside, gridlines get
+  fewer and the legend stays on one line. The dotted comparison line stops
+  at the current period's last point, and every tile title is one line
+  with the full text on hover. Where nothing can be measured, the old
+  frame is used, scaled to the width. Thanks to Matt Zymet (@zymetm) for
+  the fix (#5, closes #4).
+- **A built widget can be renamed again.** Editing a widget built from a
+  table showed only the Database and Table pickers until the Table picker
+  was reopened, so its name could not be changed. The form now loads the
+  table's columns when it opens; while they load, or when the table cannot
+  be read on this device, the name and unit stay editable and the form
+  says why. Thanks to Matt Zymet (@zymetm) for the fix (#3, closes #2).
+- **Charts in a popout window follow their tile.** Each chart's resize
+  watcher now comes from the window the tile lives in, so a dashboard
+  moved to its own window keeps redrawing as it is resized. The watchers
+  are closed when the dashboard redraws or closes (#7, follow-up to #5).
+
+### Known issues
+- The value shown while hovering a line chart can still be cut at the
+  edge of a very narrow chart.
+
 ## [0.6.0] - 2026-09-21
 
 ### Changed
