@@ -41,6 +41,11 @@ class FakeEl {
     this.disabled = false;
     this.style = {};
   }
+  /* Obsidian gives every node its window as `win`, a popout's window in a
+   * popout. Here it is inherited from the parent, so a gate sets it once on
+   * a root. Undefined unless a gate sets it. */
+  get win() { return this.ownWin !== undefined ? this.ownWin : (this.parentElement ? this.parentElement.win : undefined); }
+  set win(w) { this.ownWin = w; }
   setAttribute(k, v) { this.attrs[k] = String(v); }
   getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
   addClass(c) { this.classSet.add(c); }
