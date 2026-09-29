@@ -527,6 +527,9 @@ function parseDashboardSpec(text) {
       if (favorable !== 'up' && favorable !== 'down') {
         return { ok: false, reason: at + ': "favorable" must be "up" or "down" (which direction counts as good).' };
       }
+      if (t.rangeColumn !== undefined) {
+        return { ok: false, reason: at + ': "rangeColumn" only works on an SQL stat widget; a built widget has one value to judge.' };
+      }
       tiles.push(withLevels({
         title: typeof t.title === 'string' ? t.title : '',
         viz: t.viz,
@@ -561,6 +564,9 @@ function parseDashboardSpec(text) {
       if (typeof t.x !== 'string' || !t.x) return { ok: false, reason: at + ' needs an "x" column for a ' + t.viz + ' chart.' };
       if (y.length === 0) return { ok: false, reason: at + ' needs a "y" column for a ' + t.viz + ' chart.' };
     }
+    const scoreCheck = checkRangeColumn(t.rangeColumn, t.viz, levelCheck.ranges, y, at);
+    if (!scoreCheck.ok) return scoreCheck;
+    if (scoreCheck.rangeColumn) levelCheck.rangeColumn = scoreCheck.rangeColumn;
     tiles.push(withLevels({
       title: typeof t.title === 'string' ? t.title : '',
       sql: t.sql,
@@ -587,6 +593,7 @@ function parseDashboardSpec(text) {
 /* A parsed tile with its checked value levels, when it has any. */
 function withLevels(tile, levelCheck) {
   if (levelCheck.ranges) tile.ranges = levelCheck.ranges;
+  if (levelCheck.ranges && levelCheck.rangeColumn) tile.rangeColumn = levelCheck.rangeColumn;
   return tile;
 }
 
@@ -625,6 +632,7 @@ function specToJson(spec) {
         if (r.label) out.label = r.label;
         return out;
       });
+      if (t.rangeColumn) tile.rangeColumn = t.rangeColumn;
     }
     if (t.source) {
       const s = {};
@@ -783,13 +791,15 @@ function stackRows(rows, seriesIdx) {
 function columnIndex(columns, name) { return columns.indexOf(name); }
 
 /* The value a stat tile shows: the named y column of the first row, or the
- * first column when no y is named. The next column, if any, is the caption. */
+ * first column when no y is named. The next column, if any, is the caption;
+ * a tile's rangeColumn is judged, never shown, so it is skipped. */
 function statOf(table, tile) {
   if (!table.rows.length) return { value: null, caption: '' };
   const row = table.rows[0];
   const yName = tile.y && tile.y.length ? tile.y[0] : table.columns[0];
   const yIdx = Math.max(0, columnIndex(table.columns, yName));
-  const captionIdx = table.columns.findIndex((c, i) => i !== yIdx);
+  const scoreIdx = tile.rangeColumn ? columnIndex(table.columns, tile.rangeColumn) : -1;
+  const captionIdx = table.columns.findIndex((c, i) => i !== yIdx && i !== scoreIdx);
   return { value: row[yIdx], caption: captionIdx >= 0 ? String(row[captionIdx] === null ? '' : row[captionIdx]) : '' };
 }
 
@@ -1286,6 +1296,20 @@ function checkRanges(raw, viz, at) {
     out.push(range);
   }
   return { ok: true, ranges: out.length ? out : undefined };
+}
+
+/* Validate a tile's "rangeColumn": the column whose number the ranges
+ * judge instead of the shown value, for a value that is not one number
+ * ("114/66"). The column is never shown. Returns { ok, rangeColumn } or
+ * { ok, reason }. */
+function checkRangeColumn(raw, viz, ranges, y, at) {
+  if (raw === undefined) return { ok: true, rangeColumn: undefined };
+  if (typeof raw !== 'string' || !raw.trim()) return { ok: false, reason: at + ': "rangeColumn" must be the name of a column from the query.' };
+  if (viz !== 'stat') return { ok: false, reason: at + ': "rangeColumn" only works on a stat widget (One big number).' };
+  if (!ranges) return { ok: false, reason: at + ': "rangeColumn" needs "ranges" to judge it against.' };
+  const name = raw.trim();
+  if (Array.isArray(y) && y[0] === name) return { ok: false, reason: at + ': "rangeColumn" is the shown value already; leave it out and the ranges judge the value.' };
+  return { ok: true, rangeColumn: name };
 }
 
 /* The first range that holds the value, or null. Defensive on shape,
@@ -2048,10 +2072,16 @@ function fitStatCaption(statEl, captionEl, observers) {
 }
 
 /* The value level a stat tile's headline number lands on (never the
- * change), or null. */
+ * change), or null. With a rangeColumn, the ranges judge that column's
+ * number instead; a query without that column draws a neutral tile. */
 function statLevelOf(table, tile, extras) {
   const { value } = statOf(table, tile);
   if (value === null || value === undefined) return null;
+  if (tile.rangeColumn) {
+    const idx = columnIndex(table.columns, tile.rangeColumn);
+    if (idx < 0) return null;
+    return resolveLevel(table.rows[0][idx], tile, extras && extras.levels);
+  }
   return resolveLevel(value, tile, extras && extras.levels);
 }
 
@@ -3156,6 +3186,7 @@ class WidgetFormModal extends Modal {
         level: r.level || '',
         label: r.label || '',
       })) : [],
+      rangeColumn: existing && existing.rangeColumn ? existing.rangeColumn : '',
       advancedOpen: false,
     };
     this.schema = null;
@@ -3264,6 +3295,11 @@ class WidgetFormModal extends Modal {
       }
       const levels = this.levelsFromForm(tile.viz);
       if (!levels.ok) return levels;
+      const score = s.rangeColumn.trim() && tile.viz === 'stat' && levels.ranges
+        ? checkRangeColumn(s.rangeColumn, tile.viz, levels.ranges, y, 'This widget')
+        : { ok: true };
+      if (!score.ok) return score;
+      if (score.rangeColumn) levels.rangeColumn = score.rangeColumn;
       return { ok: true, tile: withLevels(tile, levels) };
     }
     if (!s.database) return { ok: false, reason: 'Pick a database first.' };
@@ -3836,6 +3872,13 @@ class WidgetFormModal extends Modal {
       onInput: (v) => { s.unit = v; this.touch(); },
     });
     this.renderRanges(form, s.viz);
+    if (s.viz === 'stat') {
+      this.textInput(form, {
+        label: 'Judge the ranges on column', optional: true, value: s.rangeColumn,
+        placeholder: 'empty: the shown value',
+        onInput: (v) => { s.rangeColumn = v; this.touch(); },
+      });
+    }
     this.nativeSelect(form, {
       label: 'Size', options: [['', 'Keep as is']].concat(Object.entries(SIZE_PRESETS).map(([k, p]) => [k, p.label])).slice(this.editIndex >= 0 ? 0 : 1),
       value: s.sizeKey,
@@ -4856,7 +4899,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
-  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, levelOf, resolveLevel, levelLookFor,
+  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, checkRangeColumn, levelOf, resolveLevel, levelLookFor,
   LEVEL_THEME_COLORS, DEFAULT_LEVELS, LEVEL_LOOKS, DEFAULT_LEVEL_LOOKS,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
