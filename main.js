@@ -136,6 +136,8 @@ const DEFAULT_LEVEL_LOOKS = { stat: 'rail' };
 const LEVEL_NAME_MAX = 24;
 const LEVEL_LABEL_MAX = 24;
 const RANGES_MAX = 12;
+/* A stat widget shows at most this many caption lines. */
+const CAPTIONS_MAX = 4;
 
 /* The stroke and fill for series i of n. Pure, so the rule is testable:
  * one series writes in ink, lenses carry categories, the fifth entry and
@@ -530,6 +532,9 @@ function parseDashboardSpec(text) {
       if (t.rangeColumn !== undefined) {
         return { ok: false, reason: at + ': "rangeColumn" only works on an SQL stat widget; a built widget has one value to judge.' };
       }
+      if (t.captions !== undefined) {
+        return { ok: false, reason: at + ': "captions" only work on an SQL stat widget; a built widget has one value and no other columns.' };
+      }
       tiles.push(withLevels({
         title: typeof t.title === 'string' ? t.title : '',
         viz: t.viz,
@@ -567,7 +572,9 @@ function parseDashboardSpec(text) {
     const scoreCheck = checkRangeColumn(t.rangeColumn, t.viz, levelCheck.ranges, y, at);
     if (!scoreCheck.ok) return scoreCheck;
     if (scoreCheck.rangeColumn) levelCheck.rangeColumn = scoreCheck.rangeColumn;
-    tiles.push(withLevels({
+    const captionCheck = checkCaptions(t.captions, t.viz, at);
+    if (!captionCheck.ok) return captionCheck;
+    tiles.push(withCaptions(withLevels({
       title: typeof t.title === 'string' ? t.title : '',
       sql: t.sql,
       viz: t.viz,
@@ -576,7 +583,7 @@ function parseDashboardSpec(text) {
       unit: typeof t.unit === 'string' ? t.unit : '',
       stack: t.stack === true,
       layout,
-    }, levelCheck));
+    }, levelCheck), captionCheck));
   }
   return {
     ok: true,
@@ -594,6 +601,24 @@ function parseDashboardSpec(text) {
 function withLevels(tile, levelCheck) {
   if (levelCheck.ranges) tile.ranges = levelCheck.ranges;
   if (levelCheck.ranges && levelCheck.rangeColumn) tile.rangeColumn = levelCheck.rangeColumn;
+  return tile;
+}
+
+/* Validate a stat tile's "captions": the query's columns shown as caption
+ * lines under the number, one line each, in order. Returns
+ * { ok, captions } or { ok, reason }. */
+function checkCaptions(raw, viz, at) {
+  if (raw === undefined) return { ok: true, captions: undefined };
+  if (viz !== 'stat') return { ok: false, reason: at + ': "captions" only work on a stat widget (One big number).' };
+  if (!Array.isArray(raw) || !raw.length || raw.length > CAPTIONS_MAX
+    || raw.some((c) => typeof c !== 'string' || !c.trim())) {
+    return { ok: false, reason: at + ': "captions" must be a list of 1 to ' + CAPTIONS_MAX + ' column names, like ["change", "window"].' };
+  }
+  return { ok: true, captions: raw.map((c) => c.trim()) };
+}
+
+function withCaptions(tile, check) {
+  if (check.captions) tile.captions = check.captions;
   return tile;
 }
 
@@ -634,6 +659,7 @@ function specToJson(spec) {
       });
       if (t.rangeColumn) tile.rangeColumn = t.rangeColumn;
     }
+    if (Array.isArray(t.captions) && t.captions.length) tile.captions = t.captions.slice();
     if (t.source) {
       const s = {};
       if (t.source.database) s.database = t.source.database;
@@ -792,15 +818,22 @@ function columnIndex(columns, name) { return columns.indexOf(name); }
 
 /* The value a stat tile shows: the named y column of the first row, or the
  * first column when no y is named. The next column, if any, is the caption;
- * a tile's rangeColumn is judged, never shown, so it is skipped. */
+ * a tile's rangeColumn is judged, never shown, so it is skipped. A tile
+ * with "captions" names its caption lines instead, one column each; a
+ * named column that is missing or empty gives no line. */
 function statOf(table, tile) {
-  if (!table.rows.length) return { value: null, caption: '' };
+  if (!table.rows.length) return { value: null, caption: '', captions: [] };
   const row = table.rows[0];
   const yName = tile.y && tile.y.length ? tile.y[0] : table.columns[0];
   const yIdx = Math.max(0, columnIndex(table.columns, yName));
   const scoreIdx = tile.rangeColumn ? columnIndex(table.columns, tile.rangeColumn) : -1;
   const captionIdx = table.columns.findIndex((c, i) => i !== yIdx && i !== scoreIdx);
-  return { value: row[yIdx], caption: captionIdx >= 0 ? String(row[captionIdx] === null ? '' : row[captionIdx]) : '' };
+  const text = (v) => (v === null || v === undefined ? '' : String(v));
+  const caption = captionIdx >= 0 ? text(row[captionIdx]) : '';
+  const captions = Array.isArray(tile.captions)
+    ? tile.captions.map((name) => columnIndex(table.columns, name)).filter((i) => i >= 0).map((i) => text(row[i])).filter(Boolean)
+    : (caption ? [caption] : []);
+  return { value: row[yIdx], caption, captions };
 }
 
 /* ------------------------------------------- widgets built without SQL -- */
@@ -2001,7 +2034,7 @@ function renderBarChart(parentEl, table, tile, extras) {
 }
 
 function renderStatTile(parentEl, table, tile, extras) {
-  const { value, caption } = statOf(table, tile);
+  const { value, captions } = statOf(table, tile);
   const wrap = parentEl.createDiv({ cls: 'icor-sqlv-stat' });
   if (value === null || value === undefined) {
     wrap.createDiv({ cls: 'icor-sqlv-stat-value', text: 'no data' });
@@ -2024,39 +2057,68 @@ function renderStatTile(parentEl, table, tile, extras) {
       pill.setAttribute('title', 'vs ' + formatNumber(Number(prev)) + (tile.unit ? ' ' + tile.unit : ''));
     }
   }
-  let cap = null;
-  if (caption) {
-    cap = wrap.createDiv({ cls: 'icor-sqlv-stat-caption', text: caption });
-    cap.setAttribute('title', caption);
-  }
+  /* Named caption lines ("captions") are one line each, never wrapped,
+   * cut with an ellipsis; the first stays plain (the change line), the
+   * rest are a small bulleted list. The one caption of a tile without
+   * "captions" keeps its two-line clamp. */
+  const named = Array.isArray(tile.captions);
+  let list = null;
+  const caps = captions.map((text, i) => {
+    let cap;
+    if (named && i > 0) {
+      if (!list) list = wrap.createEl('ul', { cls: 'icor-sqlv-stat-bullets' });
+      cap = list.createEl('li', { cls: 'icor-sqlv-stat-caption', text });
+      cap.addClass('is-line');
+      cap.addClass('is-bullet');
+    } else {
+      cap = wrap.createDiv({ cls: 'icor-sqlv-stat-caption', text });
+      if (named) cap.addClass('is-line');
+    }
+    cap.setAttribute('title', text);
+    return cap;
+  });
   /* The level pill closes the tile, bottom right, under everything else. */
   const level = extras && extras.pillLevel;
   if (level && level.known && level.label) {
     const pill = wrap.createDiv({ cls: 'icor-sqlv-stat-foot' }).createSpan({ cls: 'icor-sqlv-level-pill', text: level.label });
     pill.setAttribute('title', level.label);
   }
-  if (cap) fitStatCaption(wrap, cap, extras && extras.observers);
+  if (caps.length) fitStatCaption(wrap, caps.length === 1 && !named ? caps[0] : caps, extras && extras.observers, named);
   return shown + (tile.unit ? ' ' + tile.unit : '');
 }
 
 /* The caption is the one part of a stat tile that gives way: it shows two
  * whole lines, then one, then none, until the stat fits its tile, so the
  * tile edge never cuts a line and the number and the pill are never
- * touched. It measures, so it holds at any font size a theme or snippet
+ * touched. Named caption lines are one line each already, so they only
+ * drop, from the last one up. It measures, so it holds at any font size a theme or snippet
  * sets, and it re-fits when the tile resizes. Its observer comes from the
  * tile's own window, like a chart's, and joins `observers` when given.
  * Where there is no layout (no ResizeObserver), the CSS two-line clamp
  * stands alone. */
 const STAT_CAPTION_STEPS = ['', 'is-clamped-1', 'is-dropped'];
 
-function fitStatCaption(statEl, captionEl, observers) {
+function statCaptionSteps(n, oneLine) {
+  if (!oneLine) return STAT_CAPTION_STEPS.map((step) => [step]);
+  const steps = [Array(n).fill('')];
+  for (let dropped = 1; dropped <= n; dropped++) {
+    steps.push(Array.from({ length: n }, (_, i) => (i >= n - dropped ? 'is-dropped' : '')));
+  }
+  return steps;
+}
+
+function fitStatCaption(statEl, captionEls, observers, oneLine) {
+  const els = Array.isArray(captionEls) ? captionEls : [captionEls];
+  const steps = statCaptionSteps(els.length, oneLine);
   const fit = () => {
-    for (const step of STAT_CAPTION_STEPS) {
-      for (const cls of STAT_CAPTION_STEPS) if (cls) captionEl.classList.remove(cls);
-      if (step) captionEl.classList.add(step);
+    for (const step of steps) {
+      els.forEach((el, i) => {
+        for (const cls of STAT_CAPTION_STEPS) if (cls) el.classList.remove(cls);
+        if (step[i]) el.classList.add(step[i]);
+      });
       if (statEl.scrollHeight <= statEl.clientHeight + 1) return step;
     }
-    return STAT_CAPTION_STEPS[STAT_CAPTION_STEPS.length - 1];
+    return steps[steps.length - 1];
   };
   let lastHeight = -1;
   const observer = resizeObserverFor(statEl, () => {
@@ -3187,6 +3249,7 @@ class WidgetFormModal extends Modal {
         label: r.label || '',
       })) : [],
       rangeColumn: existing && existing.rangeColumn ? existing.rangeColumn : '',
+      captions: existing && Array.isArray(existing.captions) ? existing.captions.join(', ') : '',
       advancedOpen: false,
     };
     this.schema = null;
@@ -3300,7 +3363,10 @@ class WidgetFormModal extends Modal {
         : { ok: true };
       if (!score.ok) return score;
       if (score.rangeColumn) levels.rangeColumn = score.rangeColumn;
-      return { ok: true, tile: withLevels(tile, levels) };
+      const captionNames = s.captions.split(',').map((v) => v.trim()).filter(Boolean);
+      const captions = tile.viz === 'stat' && captionNames.length ? checkCaptions(captionNames, tile.viz, 'This widget') : { ok: true };
+      if (!captions.ok) return captions;
+      return { ok: true, tile: withCaptions(withLevels(tile, levels), captions) };
     }
     if (!s.database) return { ok: false, reason: 'Pick a database first.' };
     if (!s.table) return { ok: false, reason: 'Pick a table.' };
@@ -3877,6 +3943,11 @@ class WidgetFormModal extends Modal {
         label: 'Judge the ranges on column', optional: true, value: s.rangeColumn,
         placeholder: 'empty: the shown value',
         onInput: (v) => { s.rangeColumn = v; this.touch(); },
+      });
+      this.textInput(form, {
+        label: 'Caption columns (comma-separated)', optional: true, value: s.captions,
+        placeholder: 'empty: the next column',
+        onInput: (v) => { s.captions = v; this.touch(); },
       });
     }
     this.nativeSelect(form, {
@@ -4899,7 +4970,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
-  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, checkRangeColumn, levelOf, resolveLevel, levelLookFor,
+  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, checkRangeColumn, checkCaptions, statCaptionSteps, CAPTIONS_MAX, levelOf, resolveLevel, levelLookFor,
   LEVEL_THEME_COLORS, DEFAULT_LEVELS, LEVEL_LOOKS, DEFAULT_LEVEL_LOOKS,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,

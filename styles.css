@@ -809,7 +809,40 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
 
 .icor-sqlv-stat-caption.is-clamped-1 { -webkit-line-clamp: 1; }
 
-.icor-sqlv-stat-caption.is-dropped { display: none; }
+/* Named caption lines: one line each, never wrapped, cut with an
+ * ellipsis (the full text is on hover). Lines two and on are a small,
+ * muted bulleted list the plugin draws. */
+.icor-sqlv-stat-caption.is-line {
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.icor-sqlv-stat-bullets {
+  flex: 0 0 auto;
+  list-style: none;
+  margin: 2px 0 0;
+  padding: 0;
+  min-width: 0;
+}
+
+.icor-sqlv-stat-caption.is-bullet {
+  position: relative;
+  margin-top: 0;
+  padding-left: 0.9em;
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.icor-sqlv-stat-caption.is-bullet::before {
+  content: '\2022';
+  position: absolute;
+  left: 0.15em;
+}
+
+.icor-sqlv-stat-caption.is-dropped,
+.icor-sqlv-stat-caption.is-line.is-dropped { display: none; }
 
 /* The footer sits at the bottom of the stat, the pill at its right. It
  * never shrinks; the change line above it gives way first. */
