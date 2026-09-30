@@ -112,6 +112,33 @@ const SERIES_TOKEN_FAINT = 'var(--sqlv-fg-faint)';
 /* At most this many series render; past it the rest aggregate as Other. */
 const SERIES_CEILING = 5;
 
+/* Value levels on stat widgets (the rules live with levelOf). Colours
+ * are a theme variable, so they follow light and dark, or a plain
+ * hex a member picked. Nothing else passes, so a JSON file can never
+ * smuggle CSS into the tile. */
+const LEVEL_COLOR_RE = /^(#[0-9a-f]{6}|var\(--[a-z0-9-]+\))$/i;
+const LEVEL_THEME_COLORS = [
+  ['var(--color-green)', 'Green'], ['var(--color-orange)', 'Amber'], ['var(--color-red)', 'Red'],
+  ['var(--color-yellow)', 'Yellow'], ['var(--color-cyan)', 'Cyan'], ['var(--color-blue)', 'Blue'],
+  ['var(--color-purple)', 'Purple'], ['var(--color-pink)', 'Pink'],
+];
+const DEFAULT_LEVELS = [
+  { name: 'Good', color: 'var(--color-green)' },
+  { name: 'Watch', color: 'var(--color-orange)' },
+  { name: 'Alert', color: 'var(--color-red)' },
+];
+/* How a level shows, per widget type. Only the stat tile draws a level
+ * today; another widget type adds its own entry here. */
+const LEVEL_LOOKS = {
+  stat: { rail: 'Coloured left rail', outline: 'Coloured outline', tint: 'Tinted background' },
+};
+const DEFAULT_LEVEL_LOOKS = { stat: 'rail' };
+const LEVEL_NAME_MAX = 24;
+const LEVEL_LABEL_MAX = 24;
+const RANGES_MAX = 12;
+/* A stat widget shows at most this many caption lines. */
+const CAPTIONS_MAX = 4;
+
 /* The stroke and fill for series i of n. Pure, so the rule is testable:
  * one series writes in ink, lenses carry categories, the fifth entry and
  * the Other bucket stay faint, and no sixth hue is ever invented. */
@@ -167,6 +194,10 @@ const DEFAULT_SETTINGS = {
   catalogIncludeValues: false,
   /* The plugin claims .json files for its reader and the dashboards. */
   openJsonFiles: true,
+  /* The named levels a stat widget's ranges point at, and how a level
+   * shows per widget type. */
+  levels: DEFAULT_LEVELS,
+  levelLooks: DEFAULT_LEVEL_LOOKS,
 };
 
 /* ========================================================================
@@ -478,6 +509,8 @@ function parseDashboardSpec(text) {
       }
       layout = { x: l.x, y: l.y, w: l.w, h: l.h };
     }
+    const levelCheck = checkRanges(t.ranges, t.viz, at);
+    if (!levelCheck.ok) return levelCheck;
 
     if (t.source !== undefined) {
       /* A built widget. */
@@ -496,7 +529,13 @@ function parseDashboardSpec(text) {
       if (favorable !== 'up' && favorable !== 'down') {
         return { ok: false, reason: at + ': "favorable" must be "up" or "down" (which direction counts as good).' };
       }
-      tiles.push({
+      if (t.rangeColumn !== undefined) {
+        return { ok: false, reason: at + ': "rangeColumn" only works on an SQL stat widget; a built widget has one value to judge.' };
+      }
+      if (t.captions !== undefined) {
+        return { ok: false, reason: at + ': "captions" only work on an SQL stat widget; a built widget has one value and no other columns.' };
+      }
+      tiles.push(withLevels({
         title: typeof t.title === 'string' ? t.title : '',
         viz: t.viz,
         unit: typeof t.unit === 'string' ? t.unit : '',
@@ -515,7 +554,7 @@ function parseDashboardSpec(text) {
           timeColumn: t.source.timeColumn || undefined,
           timeframe: t.source.timeframe === undefined ? 'global' : t.source.timeframe,
         },
-      });
+      }, levelCheck));
       continue;
     }
 
@@ -530,7 +569,12 @@ function parseDashboardSpec(text) {
       if (typeof t.x !== 'string' || !t.x) return { ok: false, reason: at + ' needs an "x" column for a ' + t.viz + ' chart.' };
       if (y.length === 0) return { ok: false, reason: at + ' needs a "y" column for a ' + t.viz + ' chart.' };
     }
-    tiles.push({
+    const scoreCheck = checkRangeColumn(t.rangeColumn, t.viz, levelCheck.ranges, y, at);
+    if (!scoreCheck.ok) return scoreCheck;
+    if (scoreCheck.rangeColumn) levelCheck.rangeColumn = scoreCheck.rangeColumn;
+    const captionCheck = checkCaptions(t.captions, t.viz, at);
+    if (!captionCheck.ok) return captionCheck;
+    tiles.push(withCaptions(withLevels({
       title: typeof t.title === 'string' ? t.title : '',
       sql: t.sql,
       viz: t.viz,
@@ -539,7 +583,7 @@ function parseDashboardSpec(text) {
       unit: typeof t.unit === 'string' ? t.unit : '',
       stack: t.stack === true,
       layout,
-    });
+    }, levelCheck), captionCheck));
   }
   return {
     ok: true,
@@ -551,6 +595,31 @@ function parseDashboardSpec(text) {
       tiles,
     },
   };
+}
+
+/* A parsed tile with its checked value levels, when it has any. */
+function withLevels(tile, levelCheck) {
+  if (levelCheck.ranges) tile.ranges = levelCheck.ranges;
+  if (levelCheck.ranges && levelCheck.rangeColumn) tile.rangeColumn = levelCheck.rangeColumn;
+  return tile;
+}
+
+/* Validate a stat tile's "captions": the query's columns shown as caption
+ * lines under the number, one line each, in order. Returns
+ * { ok, captions } or { ok, reason }. */
+function checkCaptions(raw, viz, at) {
+  if (raw === undefined) return { ok: true, captions: undefined };
+  if (viz !== 'stat') return { ok: false, reason: at + ': "captions" only work on a stat widget (One big number).' };
+  if (!Array.isArray(raw) || !raw.length || raw.length > CAPTIONS_MAX
+    || raw.some((c) => typeof c !== 'string' || !c.trim())) {
+    return { ok: false, reason: at + ': "captions" must be a list of 1 to ' + CAPTIONS_MAX + ' column names, like ["change", "window"].' };
+  }
+  return { ok: true, captions: raw.map((c) => c.trim()) };
+}
+
+function withCaptions(tile, check) {
+  if (check.captions) tile.captions = check.captions;
+  return tile;
 }
 
 /* The database a tile actually reads. */
@@ -579,6 +648,18 @@ function specToJson(spec) {
     if (t.layout) tile.layout = { x: t.layout.x, y: t.layout.y, w: t.layout.w, h: t.layout.h };
     if (t.compare && t.compare !== 'none') tile.compare = t.compare;
     if (t.favorable && t.favorable !== 'up') tile.favorable = t.favorable;
+    if (Array.isArray(t.ranges) && t.ranges.length) {
+      tile.ranges = t.ranges.map((r) => {
+        const out = {};
+        if (r.low !== undefined) out.low = r.low;
+        if (r.high !== undefined) out.high = r.high;
+        out.level = r.level;
+        if (r.label) out.label = r.label;
+        return out;
+      });
+      if (t.rangeColumn) tile.rangeColumn = t.rangeColumn;
+    }
+    if (Array.isArray(t.captions) && t.captions.length) tile.captions = t.captions.slice();
     if (t.source) {
       const s = {};
       if (t.source.database) s.database = t.source.database;
@@ -736,14 +817,23 @@ function stackRows(rows, seriesIdx) {
 function columnIndex(columns, name) { return columns.indexOf(name); }
 
 /* The value a stat tile shows: the named y column of the first row, or the
- * first column when no y is named. The next column, if any, is the caption. */
+ * first column when no y is named. The next column, if any, is the caption;
+ * a tile's rangeColumn is judged, never shown, so it is skipped. A tile
+ * with "captions" names its caption lines instead, one column each; a
+ * named column that is missing or empty gives no line. */
 function statOf(table, tile) {
-  if (!table.rows.length) return { value: null, caption: '' };
+  if (!table.rows.length) return { value: null, caption: '', captions: [] };
   const row = table.rows[0];
   const yName = tile.y && tile.y.length ? tile.y[0] : table.columns[0];
   const yIdx = Math.max(0, columnIndex(table.columns, yName));
-  const captionIdx = table.columns.findIndex((c, i) => i !== yIdx);
-  return { value: row[yIdx], caption: captionIdx >= 0 ? String(row[captionIdx] === null ? '' : row[captionIdx]) : '' };
+  const scoreIdx = tile.rangeColumn ? columnIndex(table.columns, tile.rangeColumn) : -1;
+  const captionIdx = table.columns.findIndex((c, i) => i !== yIdx && i !== scoreIdx);
+  const text = (v) => (v === null || v === undefined ? '' : String(v));
+  const caption = captionIdx >= 0 ? text(row[captionIdx]) : '';
+  const captions = Array.isArray(tile.captions)
+    ? tile.captions.map((name) => columnIndex(table.columns, name)).filter((i) => i >= 0).map((i) => text(row[i])).filter(Boolean)
+    : (caption ? [caption] : []);
+  return { value: row[yIdx], caption, captions };
 }
 
 /* ------------------------------------------- widgets built without SQL -- */
@@ -930,7 +1020,7 @@ function pivotSeries(table) {
 function prepareTileForRender(tile, table) {
   if (!tile.source) return { spec: tile, table };
   if (tile.viz === 'stat') {
-    return { spec: { title: tile.title, viz: 'stat', y: ['value'], unit: tile.unit }, table };
+    return { spec: { title: tile.title, viz: 'stat', y: ['value'], unit: tile.unit, ranges: tile.ranges }, table };
   }
   if (tile.source.series) {
     const wide = pivotSeries(table);
@@ -1154,6 +1244,140 @@ function deltaBadge(current, previous, favorable) {
   }
   const good = direction === 'flat' ? null : (direction === (favorable === 'down' ? 'down' : 'up'));
   return { direction, label, good, diff };
+}
+
+/* ------------------------------------------------------- value levels -- */
+
+/* A stat widget can judge its headline number (never the change) against
+ * a list of ranges. Each range names a level from the plugin settings
+ * (Good, Watch, Alert by default). The first range that holds the number
+ * wins; a range with neither "low" nor "high" holds every number, so it
+ * is the "anything else" at the end. Bounds are inclusive. The colour is
+ * never the only signal: the level name rides the tile's accessible
+ * label, and a range may carry a short text pill ("see doctor"). A
+ * missing or broken setup draws a neutral tile, never an error. */
+
+function isLevelColor(v) { return typeof v === 'string' && LEVEL_COLOR_RE.test(v.trim()); }
+
+/* The levels from the settings file, made safe: a named level with a
+ * valid colour survives, anything else is dropped or loses its colour.
+ * A file with no levels at all gets the three defaults. */
+function normalizeLevels(raw) {
+  if (!Array.isArray(raw)) return DEFAULT_LEVELS.map((l) => Object.assign({}, l));
+  const out = [];
+  const seen = new Set();
+  for (const l of raw) {
+    if (!l || typeof l !== 'object') continue;
+    const name = typeof l.name === 'string' ? l.name.trim() : '';
+    if (!name || name.length > LEVEL_NAME_MAX || seen.has(name)) continue;
+    seen.add(name);
+    out.push({ name, color: isLevelColor(l.color) ? l.color.trim() : '' });
+  }
+  return out;
+}
+
+function normalizeLevelLooks(raw) {
+  const out = {};
+  for (const [kind, looks] of Object.entries(LEVEL_LOOKS)) {
+    const v = raw && typeof raw === 'object' ? raw[kind] : undefined;
+    out[kind] = Object.prototype.hasOwnProperty.call(looks, v) ? v : DEFAULT_LEVEL_LOOKS[kind];
+  }
+  return out;
+}
+
+/* Validate a tile's "ranges". Returns { ok, ranges } or { ok, reason }. */
+function checkRanges(raw, viz, at) {
+  if (raw === undefined) return { ok: true, ranges: undefined };
+  if (viz !== 'stat') return { ok: false, reason: at + ': "ranges" only work on a stat widget (One big number).' };
+  if (!Array.isArray(raw)) return { ok: false, reason: at + ': "ranges" must be a list like [{"low": 18.5, "high": 24.9, "level": "Good"}].' };
+  if (raw.length > RANGES_MAX) return { ok: false, reason: at + ': "ranges" can hold at most ' + RANGES_MAX + ' ranges.' };
+  const out = [];
+  let catchAll = -1;
+  for (let i = 0; i < raw.length; i++) {
+    const r = raw[i];
+    const where = at + ', range ' + (i + 1);
+    if (!r || typeof r !== 'object' || Array.isArray(r)) {
+      return { ok: false, reason: where + ' must be a JSON object like {"low": 18.5, "high": 24.9, "level": "Good"}.' };
+    }
+    if (catchAll >= 0) {
+      return { ok: false, reason: where + ' can never match: range ' + (catchAll + 1) + ' has no "low" and no "high", so it already catches every number. Put the catch-all last.' };
+    }
+    const range = {};
+    for (const key of ['low', 'high']) {
+      const v = r[key];
+      if (v === undefined || v === null) continue;
+      if (typeof v !== 'number' || !Number.isFinite(v)) {
+        return { ok: false, reason: where + ': "' + key + '" must be a number, or left out for no limit.' };
+      }
+      range[key] = v;
+    }
+    if (range.low !== undefined && range.high !== undefined && range.low > range.high) {
+      return { ok: false, reason: where + ': "low" (' + range.low + ') is above "high" (' + range.high + ').' };
+    }
+    const level = typeof r.level === 'string' ? r.level.trim() : '';
+    if (!level || level.length > LEVEL_NAME_MAX) {
+      return { ok: false, reason: where + ' needs a "level": the name of a level from the plugin settings, like "Good".' };
+    }
+    range.level = level;
+    if (r.label !== undefined) {
+      if (typeof r.label !== 'string' || r.label.trim().length > LEVEL_LABEL_MAX) {
+        return { ok: false, reason: where + ': "label" must be short text, ' + LEVEL_LABEL_MAX + ' characters at most.' };
+      }
+      if (r.label.trim()) range.label = r.label.trim();
+    }
+    if (range.low === undefined && range.high === undefined) catchAll = i;
+    out.push(range);
+  }
+  return { ok: true, ranges: out.length ? out : undefined };
+}
+
+/* Validate a tile's "rangeColumn": the column whose number the ranges
+ * judge instead of the shown value, for a value that is not one number
+ * ("114/66"). The column is never shown. Returns { ok, rangeColumn } or
+ * { ok, reason }. */
+function checkRangeColumn(raw, viz, ranges, y, at) {
+  if (raw === undefined) return { ok: true, rangeColumn: undefined };
+  if (typeof raw !== 'string' || !raw.trim()) return { ok: false, reason: at + ': "rangeColumn" must be the name of a column from the query.' };
+  if (viz !== 'stat') return { ok: false, reason: at + ': "rangeColumn" only works on a stat widget (One big number).' };
+  if (!ranges) return { ok: false, reason: at + ': "rangeColumn" needs "ranges" to judge it against.' };
+  const name = raw.trim();
+  if (Array.isArray(y) && y[0] === name) return { ok: false, reason: at + ': "rangeColumn" is the shown value already; leave it out and the ranges judge the value.' };
+  return { ok: true, rangeColumn: name };
+}
+
+/* The first range that holds the value, or null. Defensive on shape,
+ * because a cached tile is a plain file that can be edited by hand: a
+ * range with a broken bound never matches. Values arrive as numbers or
+ * as numeric text (printf output). */
+function levelOf(value, ranges) {
+  if (!Array.isArray(ranges) || !ranges.length) return null;
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  const v = Number(value);
+  if (!Number.isFinite(v)) return null;
+  const bound = (b) => b === undefined || b === null || (typeof b === 'number' && Number.isFinite(b));
+  for (const r of ranges) {
+    if (!r || typeof r !== 'object' || typeof r.level !== 'string' || !r.level) continue;
+    if (!bound(r.low) || !bound(r.high)) continue;
+    if (typeof r.low === 'number' && v < r.low) continue;
+    if (typeof r.high === 'number' && v > r.high) continue;
+    return r;
+  }
+  return null;
+}
+
+/* The level a tile's value lands on, with its colour from the settings.
+ * null when nothing matches; known is false when the range names a level
+ * the settings do not have (the tile then stays neutral). */
+function resolveLevel(value, tile, levels) {
+  const range = levelOf(value, tile && tile.ranges);
+  if (!range) return null;
+  const known = Array.isArray(levels) ? levels.find((l) => l && l.name === range.level) : null;
+  const color = known && isLevelColor(known.color) ? known.color.trim() : '';
+  return { name: range.level, label: typeof range.label === 'string' ? range.label : '', color, known: !!known };
+}
+
+function levelLookFor(kind, looks) {
+  return normalizeLevelLooks(looks)[kind] || DEFAULT_LEVEL_LOOKS[kind] || '';
 }
 
 /* The preview gate as a state machine: a widget that never previewed
@@ -1810,14 +2034,15 @@ function renderBarChart(parentEl, table, tile, extras) {
 }
 
 function renderStatTile(parentEl, table, tile, extras) {
-  const { value, caption } = statOf(table, tile);
+  const { value, captions } = statOf(table, tile);
   const wrap = parentEl.createDiv({ cls: 'icor-sqlv-stat' });
   if (value === null || value === undefined) {
     wrap.createDiv({ cls: 'icor-sqlv-stat-value', text: 'no data' });
-    return;
+    return null;
   }
   const line = wrap.createDiv({ cls: 'icor-sqlv-stat-value' });
-  line.createSpan({ text: formatNumber(typeof value === 'string' ? value : Number(value)) });
+  const shown = formatNumber(typeof value === 'string' ? value : Number(value));
+  line.createSpan({ text: shown });
   if (tile.unit) line.createSpan({ cls: 'icor-sqlv-stat-unit', text: ' ' + tile.unit });
   /* The comparison badge: the triangle points where the number went; the
    * color says whether that direction is good FOR THIS metric. */
@@ -1832,7 +2057,110 @@ function renderStatTile(parentEl, table, tile, extras) {
       pill.setAttribute('title', 'vs ' + formatNumber(Number(prev)) + (tile.unit ? ' ' + tile.unit : ''));
     }
   }
-  if (caption) wrap.createDiv({ cls: 'icor-sqlv-stat-caption', text: caption });
+  /* Named caption lines ("captions") are one line each, never wrapped,
+   * cut with an ellipsis; the first stays plain (the change line), the
+   * rest are a small bulleted list. The one caption of a tile without
+   * "captions" keeps its two-line clamp. */
+  const named = Array.isArray(tile.captions);
+  let list = null;
+  const caps = captions.map((text, i) => {
+    let cap;
+    if (named && i > 0) {
+      if (!list) list = wrap.createEl('ul', { cls: 'icor-sqlv-stat-bullets' });
+      cap = list.createEl('li', { cls: 'icor-sqlv-stat-caption', text });
+      cap.addClass('is-line');
+      cap.addClass('is-bullet');
+    } else {
+      cap = wrap.createDiv({ cls: 'icor-sqlv-stat-caption', text });
+      if (named) cap.addClass('is-line');
+    }
+    cap.setAttribute('title', text);
+    return cap;
+  });
+  /* The level pill closes the tile, bottom right, under everything else. */
+  const level = extras && extras.pillLevel;
+  if (level && level.known && level.label) {
+    const pill = wrap.createDiv({ cls: 'icor-sqlv-stat-foot' }).createSpan({ cls: 'icor-sqlv-level-pill', text: level.label });
+    pill.setAttribute('title', level.label);
+  }
+  if (caps.length) fitStatCaption(wrap, caps.length === 1 && !named ? caps[0] : caps, extras && extras.observers, named);
+  return shown + (tile.unit ? ' ' + tile.unit : '');
+}
+
+/* The caption is the one part of a stat tile that gives way: it shows two
+ * whole lines, then one, then none, until the stat fits its tile, so the
+ * tile edge never cuts a line and the number and the pill are never
+ * touched. Named caption lines are one line each already, so they only
+ * drop, from the last one up. It measures, so it holds at any font size a theme or snippet
+ * sets, and it re-fits when the tile resizes. Its observer comes from the
+ * tile's own window, like a chart's, and joins `observers` when given.
+ * Where there is no layout (no ResizeObserver), the CSS two-line clamp
+ * stands alone. */
+const STAT_CAPTION_STEPS = ['', 'is-clamped-1', 'is-dropped'];
+
+function statCaptionSteps(n, oneLine) {
+  if (!oneLine) return STAT_CAPTION_STEPS.map((step) => [step]);
+  const steps = [Array(n).fill('')];
+  for (let dropped = 1; dropped <= n; dropped++) {
+    steps.push(Array.from({ length: n }, (_, i) => (i >= n - dropped ? 'is-dropped' : '')));
+  }
+  return steps;
+}
+
+function fitStatCaption(statEl, captionEls, observers, oneLine) {
+  const els = Array.isArray(captionEls) ? captionEls : [captionEls];
+  const steps = statCaptionSteps(els.length, oneLine);
+  const fit = () => {
+    for (const step of steps) {
+      els.forEach((el, i) => {
+        for (const cls of STAT_CAPTION_STEPS) if (cls) el.classList.remove(cls);
+        if (step[i]) el.classList.add(step[i]);
+      });
+      if (statEl.scrollHeight <= statEl.clientHeight + 1) return step;
+    }
+    return steps[steps.length - 1];
+  };
+  let lastHeight = -1;
+  const observer = resizeObserverFor(statEl, () => {
+    if (!statEl.isConnected) { observer.disconnect(); return; }
+    if (statEl.clientHeight === lastHeight) return;
+    lastHeight = statEl.clientHeight;
+    fit();
+  });
+  if (!observer) return;
+  observer.observe(statEl);
+  if (observers) observers.push(observer);
+  return fit;
+}
+
+/* The value level a stat tile's headline number lands on (never the
+ * change), or null. With a rangeColumn, the ranges judge that column's
+ * number instead; a query without that column draws a neutral tile. */
+function statLevelOf(table, tile, extras) {
+  const { value } = statOf(table, tile);
+  if (value === null || value === undefined) return null;
+  if (tile.rangeColumn) {
+    const idx = columnIndex(table.columns, tile.rangeColumn);
+    if (idx < 0) return null;
+    return resolveLevel(table.rows[0][idx], tile, extras && extras.levels);
+  }
+  return resolveLevel(value, tile, extras && extras.levels);
+}
+
+/* Mark a tile with its value level: the look chosen for this widget type
+ * in the settings, the colour as one custom property, and the level name
+ * as the tile's accessible label so the colour is never the only signal.
+ * A level the settings do not know leaves the tile neutral. */
+function applyLevel(tileEl, level, kind, tile, extras) {
+  if (!level || !level.known) return;
+  const look = levelLookFor(kind, extras && extras.levelLooks);
+  if (level.color && look) {
+    tileEl.addClass('is-level');
+    tileEl.addClass('is-level-' + look);
+    tileEl.style.setProperty('--sqlv-level-color', level.color);
+  }
+  tileEl.setAttribute('role', 'group');
+  tileEl.setAttribute('aria-label', [tile.title, level.shown, 'level ' + level.name, level.label].filter(Boolean).join(', '));
 }
 
 function renderResultTable(parentEl, table, { maxRows } = {}) {
@@ -1856,13 +2184,26 @@ function renderResultTable(parentEl, table, { maxRows } = {}) {
 }
 
 function renderTile(tileEl, tileSpec, table, extras) {
+  if (tileSpec.viz === 'stat') {
+    /* Top to bottom: the title (its own full row, one line), the number,
+     * the change line, and the level pill in a footer at the bottom right.
+     * Only the change line gives way when space runs short. */
+    const level = statLevelOf(table, tileSpec, extras);
+    if (tileSpec.title) {
+      const title = tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
+      title.setAttribute('title', tileSpec.title);
+    }
+    const body = tileEl.createDiv({ cls: 'icor-sqlv-tile-body' });
+    const shown = renderStatTile(body, table, tileSpec, Object.assign({}, extras, { pillLevel: level }));
+    applyLevel(tileEl, level && shown ? Object.assign({ shown }, level) : null, 'stat', tileSpec, extras);
+    return;
+  }
   if (tileSpec.title) {
     const title = tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
     title.setAttribute('title', tileSpec.title);
   }
   const body = tileEl.createDiv({ cls: 'icor-sqlv-tile-body' });
-  if (tileSpec.viz === 'stat') renderStatTile(body, table, tileSpec, extras);
-  else if (tileSpec.viz === 'line') renderLineChart(body, table, tileSpec, extras);
+  if (tileSpec.viz === 'line') renderLineChart(body, table, tileSpec, extras);
   else if (tileSpec.viz === 'bar') renderBarChart(body, table, tileSpec, extras);
   else renderResultTable(body, table, { maxRows: 50 });
 }
@@ -2717,7 +3058,7 @@ class SqliteDashboardsView extends ItemView {
             ghost = { columns: ghostRes.columns, rows: ghostRes.rows };
           }
           const prepared = prepareTileForRender(tile, res);
-          renderTile(tileEl, prepared.spec, prepared.table, { ghost, compare: tile.compare, favorable: tile.favorable, observers: this.tileROs });
+          renderTile(tileEl, prepared.spec, prepared.table, Object.assign({ ghost, compare: tile.compare, favorable: tile.favorable, observers: this.tileROs }, this.plugin.levelExtras()));
           cachedTiles.push(Object.assign({}, tile, { columns: res.columns, rows: res.rows, ghost }));
           this.plugin.maybeWriteCatalog(db);
         } catch (e) {
@@ -2732,7 +3073,7 @@ class SqliteDashboardsView extends ItemView {
       if (cachedTile) {
         try {
           const prepared = prepareTileForRender(cachedTile, { columns: cachedTile.columns, rows: cachedTile.rows });
-          renderTile(tileEl, prepared.spec, prepared.table, { ghost: cachedTile.ghost || null, compare: cachedTile.compare, favorable: cachedTile.favorable, observers: this.tileROs });
+          renderTile(tileEl, prepared.spec, prepared.table, Object.assign({ ghost: cachedTile.ghost || null, compare: cachedTile.compare, favorable: cachedTile.favorable, observers: this.tileROs }, this.plugin.levelExtras()));
           const cacheNote = 'Computed on desktop, ' + relativeTime(cache.computedAt) + '.';
           tileEl.createDiv({ cls: 'icor-sqlv-note icor-sqlv-cache-note', text: cacheNote }).setAttribute('title', cacheNote);
           fromCache++;
@@ -2899,6 +3240,16 @@ class WidgetFormModal extends Modal {
       sqlText: existing && existing.sql ? existing.sql : '',
       x: existing && existing.x ? existing.x : 'x',
       y: existing && existing.y && existing.y.length ? existing.y.join(', ') : 'value',
+      /* Value levels, as the form edits them: the bounds stay text until
+       * buildTile reads them. */
+      ranges: existing && Array.isArray(existing.ranges) ? existing.ranges.map((r) => ({
+        low: r.low === undefined ? '' : String(r.low),
+        high: r.high === undefined ? '' : String(r.high),
+        level: r.level || '',
+        label: r.label || '',
+      })) : [],
+      rangeColumn: existing && existing.rangeColumn ? existing.rangeColumn : '',
+      captions: existing && Array.isArray(existing.captions) ? existing.captions.join(', ') : '',
       advancedOpen: false,
     };
     this.schema = null;
@@ -3005,7 +3356,17 @@ class WidgetFormModal extends Modal {
       if ((tile.viz === 'line' || tile.viz === 'bar') && (!tile.x || !y.length)) {
         return { ok: false, reason: 'A ' + tile.viz + ' chart needs the x column and at least one y column.' };
       }
-      return { ok: true, tile };
+      const levels = this.levelsFromForm(tile.viz);
+      if (!levels.ok) return levels;
+      const score = s.rangeColumn.trim() && tile.viz === 'stat' && levels.ranges
+        ? checkRangeColumn(s.rangeColumn, tile.viz, levels.ranges, y, 'This widget')
+        : { ok: true };
+      if (!score.ok) return score;
+      if (score.rangeColumn) levels.rangeColumn = score.rangeColumn;
+      const captionNames = s.captions.split(',').map((v) => v.trim()).filter(Boolean);
+      const captions = tile.viz === 'stat' && captionNames.length ? checkCaptions(captionNames, tile.viz, 'This widget') : { ok: true };
+      if (!captions.ok) return captions;
+      return { ok: true, tile: withCaptions(withLevels(tile, levels), captions) };
     }
     if (!s.database) return { ok: false, reason: 'Pick a database first.' };
     if (!s.table) return { ok: false, reason: 'Pick a table.' };
@@ -3044,7 +3405,29 @@ class WidgetFormModal extends Modal {
     const check = checkWidgetSource(source, viz, 'This widget');
     if (!check.ok) return check;
     source.filters = check.filters;
-    return { ok: true, tile };
+    const levels = this.levelsFromForm(viz);
+    if (!levels.ok) return levels;
+    return { ok: true, tile: withLevels(tile, levels) };
+  }
+
+  /* The form's range rows as checked ranges. Only a stat widget carries
+   * them; the rows stay in the form if the chart type changes back. */
+  levelsFromForm(viz) {
+    if (viz !== 'stat' || !this.state.ranges.length) return { ok: true, ranges: undefined };
+    const raw = [];
+    for (let i = 0; i < this.state.ranges.length; i++) {
+      const row = this.state.ranges[i];
+      const out = { level: row.level, label: row.label };
+      for (const key of ['low', 'high']) {
+        const text = String(row[key] === undefined ? '' : row[key]).trim();
+        if (!text) continue;
+        const n = Number(text);
+        if (!Number.isFinite(n)) return { ok: false, reason: 'Range ' + (i + 1) + ': the ' + key + ' end must be a number, or left empty for no limit.' };
+        out[key] = n;
+      }
+      raw.push(out);
+    }
+    return checkRanges(raw, viz, 'This widget');
   }
 
   suggestedTitle() {
@@ -3082,7 +3465,7 @@ class WidgetFormModal extends Modal {
       this.previewEl.empty();
       const tileEl = this.previewEl.createDiv({ cls: 'icor-sqlv-tile is-preview' + (tile.viz === 'stat' ? ' is-stat' : '') });
       const prepared = prepareTileForRender(tile, res);
-      renderTile(tileEl, prepared.spec, prepared.table, { ghost, compare: tile.compare, favorable: tile.favorable });
+      renderTile(tileEl, prepared.spec, prepared.table, Object.assign({ ghost, compare: tile.compare, favorable: tile.favorable }, this.plugin.levelExtras()));
       if (!res.rows.length) this.previewEl.createDiv({ cls: 'icor-sqlv-note', text: 'The query ran but returned no rows. Check the filters and the period.' });
       this.previewState = nextPreviewState(this.previewState, 'ok');
       this.syncGate();
@@ -3305,6 +3688,8 @@ class WidgetFormModal extends Modal {
         cb.addEventListener('change', () => { s.stack = cb.checked; this.touch(); });
       }
 
+      this.renderRanges(form, s.agg === 'latest' ? 'stat' : s.viz);
+
       this.nativeSelect(form, {
         label: 'Size', options: [['', 'Keep as is']].concat(Object.entries(SIZE_PRESETS).map(([k, p]) => [k, p.label])).slice(this.editIndex >= 0 ? 0 : 1),
         value: s.sizeKey,
@@ -3423,6 +3808,71 @@ class WidgetFormModal extends Modal {
     if (s.filters.length > 1) wrap.createDiv({ cls: 'icor-sqlv-note', text: 'All filter rows must match (AND).' });
   }
 
+  /* Value levels: which level the headline number lands on. One row per
+   * range, the first that holds the number wins. The levels themselves
+   * (names and colours) live in the plugin settings. */
+  renderRanges(form, viz) {
+    if (viz !== 'stat') return;
+    const s = this.state;
+    const levels = (this.plugin.settings && this.plugin.settings.levels) || [];
+    const names = levels.map((l) => l.name);
+    const wrap = this.field(form, { label: 'Value levels', optional: true });
+    wrap.createDiv({ cls: 'icor-sqlv-note', text: 'Colour the number by where it lands. The first range that holds it wins; leave low or high empty for no limit. The levels and their colours live in the plugin settings.' });
+    const rows = wrap.createDiv({ cls: 'icor-sqlv-filter-rows icor-sqlv-range-rows' });
+    s.ranges.forEach((row, i) => {
+      const at = 'Range ' + (i + 1);
+      const rowEl = rows.createDiv({ cls: 'icor-sqlv-filter-row-edit icor-sqlv-range-row' });
+      for (const key of ['low', 'high']) {
+        const input = rowEl.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input icor-sqlv-range-num', value: row[key] });
+        input.setAttribute('placeholder', key === 'low' ? 'from' : 'to');
+        input.setAttribute('inputmode', 'decimal');
+        input.setAttribute('aria-label', at + ': ' + (key === 'low' ? 'lowest value (empty for no limit)' : 'highest value (empty for no limit)'));
+        input.addEventListener('input', () => { row[key] = input.value; this.touch(); });
+      }
+      const select = rowEl.createEl('select', { cls: 'dropdown' });
+      select.setAttribute('aria-label', at + ': level');
+      const options = names.includes(row.level) || !row.level ? names : names.concat([row.level]);
+      for (const name of options) {
+        const opt = select.createEl('option', { text: names.includes(name) ? name : name + ' (not in settings)' });
+        opt.value = name;
+        if (name === row.level) opt.selected = true;
+      }
+      select.addEventListener('change', () => { row.level = select.value; this.touch(); });
+      const label = rowEl.createEl('input', { type: 'text', cls: 'icor-sqlv-wizard-input', value: row.label });
+      label.setAttribute('placeholder', 'pill text (optional)');
+      label.setAttribute('aria-label', at + ': short text shown as a pill (optional)');
+      label.addEventListener('input', () => { row.label = label.value; this.touch(); });
+      const remove = rowEl.createEl('button', { cls: 'icor-sqlv-tile-action icor-sqlv-filter-remove' });
+      setIcon(remove, 'x');
+      remove.setAttribute('aria-label', 'Remove ' + at.toLowerCase());
+      remove.addEventListener('click', () => { s.ranges.splice(i, 1); this.renderForm(); this.touch(); });
+    });
+    if (!names.length) {
+      wrap.createDiv({ cls: 'icor-sqlv-note', text: 'No levels are set up yet. Add them in the plugin settings first.' });
+      return;
+    }
+    const isCatchAll = (r) => !String(r.low).trim() && !String(r.high).trim();
+    const hasCatchAll = s.ranges.length > 0 && isCatchAll(s.ranges[s.ranges.length - 1]);
+    const add = wrap.createEl('button', { text: '+ Add range', cls: 'icor-sqlv-add-filter' });
+    add.addEventListener('click', () => {
+      const row = { low: '', high: '', level: names[0], label: '' };
+      /* A new range goes before the catch-all, which must stay last. */
+      if (hasCatchAll) s.ranges.splice(s.ranges.length - 1, 0, row);
+      else s.ranges.push(row);
+      this.renderForm();
+      this.touch();
+    });
+    if (!hasCatchAll) {
+      const other = wrap.createEl('button', { text: '+ Anything else', cls: 'icor-sqlv-add-filter' });
+      other.setAttribute('aria-label', 'Add a last range that catches every other number');
+      other.addEventListener('click', () => {
+        s.ranges.push({ low: '', high: '', level: names[names.length - 1], label: '' });
+        this.renderForm();
+        this.touch();
+      });
+    }
+  }
+
   renderAdvanced(form) {
     const s = this.state;
     const adv = form.createDiv({ cls: 'icor-sqlv-advanced' });
@@ -3487,6 +3937,19 @@ class WidgetFormModal extends Modal {
       label: 'Unit', optional: true, value: s.unit, placeholder: 'kg, steps, kcal …',
       onInput: (v) => { s.unit = v; this.touch(); },
     });
+    this.renderRanges(form, s.viz);
+    if (s.viz === 'stat') {
+      this.textInput(form, {
+        label: 'Judge the ranges on column', optional: true, value: s.rangeColumn,
+        placeholder: 'empty: the shown value',
+        onInput: (v) => { s.rangeColumn = v; this.touch(); },
+      });
+      this.textInput(form, {
+        label: 'Caption columns (comma-separated)', optional: true, value: s.captions,
+        placeholder: 'empty: the next column',
+        onInput: (v) => { s.captions = v; this.touch(); },
+      });
+    }
     this.nativeSelect(form, {
       label: 'Size', options: [['', 'Keep as is']].concat(Object.entries(SIZE_PRESETS).map(([k, p]) => [k, p.label])).slice(this.editIndex >= 0 ? 0 : 1),
       value: s.sizeKey,
@@ -3715,6 +4178,8 @@ class SqliteViewerSettingTab extends PluginSettingTab {
         new Notice('Reload the plugin (or restart Obsidian) to apply this.');
       }));
 
+    this.displayLevels(containerEl);
+
     new Setting(containerEl).setName('Tidy up').setHeading();
     new Setting(containerEl)
       .setName('Move databases into ' + this.plugin.settings.dataFolder)
@@ -3725,6 +4190,70 @@ class SqliteViewerSettingTab extends PluginSettingTab {
         const plan = planMigration(dbs.map((d) => d.path), existing, this.plugin.settings.dataFolder);
         new MigrationModal(this.plugin, plan).open();
       }));
+  }
+
+  /* The value levels a stat widget's ranges point at: a name and a colour
+   * each, plus how a level shows per widget type. A widget names a level;
+   * renaming one here leaves the widgets that used the old name neutral
+   * until they are edited. */
+  displayLevels(containerEl) {
+    const settings = this.plugin.settings;
+    const save = async (redraw) => { await this.plugin.saveSettings(); if (redraw) this.display(); };
+    new Setting(containerEl).setName('Value levels').setHeading();
+    containerEl.createDiv({ cls: 'icor-sqlv-note', text: 'A "One big number" widget can colour itself by where its number lands: each widget lists its own ranges and names one of these levels for each. The colour is never the only signal; the level name is read out, and a range can add a short text. Renaming a level leaves widgets that use the old name neutral until you edit them.' });
+    settings.levels.forEach((level, i) => {
+      const themed = LEVEL_THEME_COLORS.some(([v]) => v === level.color);
+      const row = new Setting(containerEl).setName('Level ' + (i + 1));
+      row.addText((t) => t.setPlaceholder('Name').setValue(level.name).onChange(async (v) => {
+        const name = v.trim();
+        if (!name || name.length > LEVEL_NAME_MAX) return;
+        if (settings.levels.some((other, j) => j !== i && other.name === name)) { new Notice('There is already a level called ' + name + '.'); return; }
+        level.name = name;
+        await save(false);
+      }));
+      row.addDropdown((d) => {
+        for (const [value, label] of LEVEL_THEME_COLORS) d.addOption(value, label + ' (theme)');
+        d.addOption('custom', 'Custom colour');
+        d.setValue(themed ? level.color : 'custom');
+        d.onChange(async (v) => {
+          level.color = v === 'custom' ? (/^#/.test(level.color) ? level.color : '#808080') : v;
+          await save(true);
+        });
+      });
+      if (!themed) {
+        row.addColorPicker((c) => c.setValue(/^#/.test(level.color) ? level.color : '#808080').onChange(async (v) => {
+          if (!isLevelColor(v)) return;
+          level.color = v;
+          await save(false);
+        }));
+      }
+      row.addExtraButton((b) => b.setIcon('trash-2').setTooltip('Remove this level').onClick(async () => {
+        settings.levels.splice(i, 1);
+        await save(true);
+      }));
+    });
+    new Setting(containerEl)
+      .addButton((b) => b.setButtonText('Add a level').onClick(async () => {
+        let n = settings.levels.length + 1;
+        while (settings.levels.some((l) => l.name === 'Level ' + n)) n++;
+        settings.levels.push({ name: 'Level ' + n, color: 'var(--color-blue)' });
+        await save(true);
+      }))
+      .addButton((b) => b.setButtonText('Back to Good, Watch, Alert').onClick(async () => {
+        settings.levels = DEFAULT_LEVELS.map((l) => Object.assign({}, l));
+        await save(true);
+      }));
+    new Setting(containerEl)
+      .setName('How a level shows on "One big number"')
+      .setDesc('The coloured mark a stat widget gets when its number lands on a level.')
+      .addDropdown((d) => {
+        for (const [value, label] of Object.entries(LEVEL_LOOKS.stat)) d.addOption(value, label);
+        d.setValue(levelLookFor('stat', settings.levelLooks));
+        d.onChange(async (v) => {
+          settings.levelLooks = normalizeLevelLooks(Object.assign({}, settings.levelLooks, { stat: v }));
+          await save(false);
+        });
+      });
   }
 }
 
@@ -4143,6 +4672,14 @@ class IcorSqliteViewerPlugin extends Plugin {
 
   async loadSettings() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.levels = normalizeLevels(this.settings.levels);
+    this.settings.levelLooks = normalizeLevelLooks(this.settings.levelLooks);
+  }
+
+  /* What every tile render needs to draw value levels. */
+  levelExtras() {
+    const settings = this.settings || {};
+    return { levels: settings.levels || [], levelLooks: settings.levelLooks };
   }
 
   /* The 0.5.0 rename: the default home moved from "07 Data" to
@@ -4433,6 +4970,8 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
+  fitStatCaption, STAT_CAPTION_STEPS, isLevelColor, normalizeLevels, normalizeLevelLooks, checkRanges, checkRangeColumn, checkCaptions, statCaptionSteps, CAPTIONS_MAX, levelOf, resolveLevel, levelLookFor,
+  LEVEL_THEME_COLORS, DEFAULT_LEVELS, LEVEL_LOOKS, DEFAULT_LEVEL_LOOKS,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
