@@ -39,7 +39,7 @@ class FakeEl {
     this.textContent = '';
     this.value = '';
     this.disabled = false;
-    this.style = {};
+    this.style = { setProperty(k, v) { this[k] = String(v); } };
   }
   /* Obsidian gives every node its window as `win`, a popout's window in a
    * popout. Here it is inherited from the parent, so a gate sets it once on
