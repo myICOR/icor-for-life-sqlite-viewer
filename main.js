@@ -91,7 +91,7 @@ const READ_PRAGMA_FUNCS = new Set([
   'table_info', 'table_xinfo', 'table_list', 'index_list', 'index_info', 'index_xinfo',
   'foreign_key_list', 'integrity_check', 'quick_check',
 ]);
-const VIZ_KINDS = new Set(['line', 'bar', 'stat', 'table']);
+const VIZ_KINDS = new Set(['line', 'bar', 'stat', 'table', 'divider']);
 const VIEW_BROWSER = 'icor-sqlite-viewer-browser';
 const VIEW_DASHBOARDS = 'icor-sqlite-viewer-dashboards';
 const VIEW_JSON = 'icor-sqlite-viewer-json';
@@ -132,6 +132,9 @@ const GRID_MAX_COLS = 6;
 const GRID_UNIT_PX = 170;
 const GRID_GAP_PX = 12;
 const SPAN_CAP = 12;
+/* A section divider lives in a thin row: a grid row that holds nothing
+ * but dividers is this tall instead of a full cell. */
+const DIVIDER_ROW_PX = 24;
 
 /* Vaults from before 0.5.0 keep their "07 Data" home: when the configured
  * data folder does not exist but the legacy one does, the legacy folder is
@@ -464,7 +467,7 @@ function parseDashboardSpec(text) {
     const t = raw.tiles[i];
     const at = 'Tile ' + (i + 1);
     if (!t || typeof t !== 'object') return { ok: false, reason: at + ' must be a JSON object.' };
-    if (!VIZ_KINDS.has(t.viz)) return { ok: false, reason: at + ' needs a "viz" of line, bar, stat or table.' };
+    if (!VIZ_KINDS.has(t.viz)) return { ok: false, reason: at + ' needs a "viz" of line, bar, stat, table or divider.' };
 
     let layout;
     if (t.layout !== undefined) {
@@ -477,6 +480,21 @@ function parseDashboardSpec(text) {
         return { ok: false, reason: at + ': "layout" must be {x, y, w, h} in whole grid cells, w and h at least 1 and at most ' + SPAN_CAP + '.' };
       }
       layout = { x: l.x, y: l.y, w: l.w, h: l.h };
+    }
+
+    if (t.viz === 'divider') {
+      /* A section divider: a thin line with an optional heading. No data. */
+      if (t.sql !== undefined || t.source !== undefined) {
+        return { ok: false, reason: at + ': a section divider draws no data, so it takes no "sql" or "source". Remove them, or pick another "viz".' };
+      }
+      if (t.title !== undefined && typeof t.title !== 'string') {
+        return { ok: false, reason: at + ': the heading ("title") of a section divider must be text.' };
+      }
+      if (layout && layout.h !== 1) {
+        return { ok: false, reason: at + ': a section divider is one thin row, so its "layout" h must be 1.' };
+      }
+      tiles.push({ title: typeof t.title === 'string' ? t.title : '', viz: 'divider', layout });
+      continue;
     }
 
     if (t.source !== undefined) {
@@ -579,6 +597,7 @@ function specToJson(spec) {
     if (t.layout) tile.layout = { x: t.layout.x, y: t.layout.y, w: t.layout.w, h: t.layout.h };
     if (t.compare && t.compare !== 'none') tile.compare = t.compare;
     if (t.favorable && t.favorable !== 'up') tile.favorable = t.favorable;
+    if (t.viz === 'divider') return tile;
     if (t.source) {
       const s = {};
       if (t.source.database) s.database = t.source.database;
@@ -1011,6 +1030,7 @@ function colsForWidth(width) {
 /* The span a widget gets when its spec carries none (a 0.2.x file):
  * a stat is a small square, a chart a 2x2 block, a table a wide 3x2. */
 function defaultSpanFor(tile) {
+  if (tile.viz === 'divider') return { w: GRID_MAX_COLS, h: 1 };
   if (tile.viz === 'stat') return { w: 1, h: 1 };
   if (tile.viz === 'table') return { w: 3, h: 2 };
   return { w: 2, h: 2 };
@@ -1096,6 +1116,44 @@ function normalizeLayout(tiles, cols) {
     }
   }
   return packLayout(layouts, cols, -1);
+}
+
+/* THE ROW HEIGHTS, in plain words: the grid keeps one row unit for every
+ * widget, and a row whose only occupants are section dividers is drawn
+ * DIVIDER_ROW_PX tall instead of a full cell. A row that also holds a
+ * widget (or the add tile), and an empty row, stay a full cell. So the
+ * layout, the packing and the saved {x, y, w, h} are unchanged; only the
+ * track heights differ. rects: [{ l: {x,y,w,h}, thin }]. */
+function rowTracks(rects, cellH) {
+  let rows = 0;
+  for (const { l } of rects) rows = Math.max(rows, l.y + l.h);
+  const tracks = [];
+  for (let r = 0; r < rows; r++) {
+    let thin = false;
+    let full = false;
+    for (const { l, thin: isThin } of rects) {
+      if (r < l.y || r >= l.y + l.h) continue;
+      if (isThin) thin = true; else full = true;
+    }
+    tracks.push(thin && !full ? DIVIDER_ROW_PX : cellH);
+  }
+  return tracks;
+}
+
+/* How many rows a drag of dy pixels crosses, starting at row fromRow,
+ * when rows differ in height: a row is crossed once the pointer passes
+ * half of it (with its gap), the same rounding as uniform rows had. */
+function rowsForOffset(tracks, gap, fromRow, dy, fallback) {
+  const size = (r) => (r >= 0 && r < tracks.length ? tracks[r] : fallback) + gap;
+  let rem = dy;
+  let r = fromRow;
+  let d = 0;
+  if (dy > 0) {
+    while (rem >= size(r) / 2) { rem -= size(r); r++; d++; }
+  } else {
+    while (r > 0 && -rem > size(r - 1) / 2) { rem += size(r - 1); r--; d--; }
+  }
+  return d;
 }
 
 /* The + tile shows only on an empty dashboard or in edit mode: a full
@@ -1855,7 +1913,22 @@ function renderResultTable(parentEl, table, { maxRows } = {}) {
   return scroller;
 }
 
+/* A section divider: a line through the heading's vertical centre, with a
+ * real gap around the heading (never a filled background), starting a
+ * short stretch in from the left edge. Without a heading, just the line. */
+function renderDivider(parentEl, heading) {
+  const text = typeof heading === 'string' ? heading.trim() : '';
+  const rule = parentEl.createDiv({ cls: 'icor-sqlv-divider' + (text ? ' has-heading' : '') });
+  rule.setAttribute('role', 'separator');
+  if (text) {
+    rule.setAttribute('aria-label', text);
+    rule.createSpan({ cls: 'icor-sqlv-divider-heading', text }).setAttribute('title', text);
+  }
+  return rule;
+}
+
 function renderTile(tileEl, tileSpec, table, extras) {
+  if (tileSpec.viz === 'divider') { renderDivider(tileEl, tileSpec.title); return; }
   if (tileSpec.title) {
     const title = tileEl.createDiv({ cls: 'icor-sqlv-tile-title', text: tileSpec.title });
     title.setAttribute('title', tileSpec.title);
@@ -2420,10 +2493,21 @@ class SqliteDashboardsView extends ItemView {
     this.releaseTileObservers();
   }
 
+  /* Row heights follow what lives in each row (rowTracks): a row of only
+   * dividers is thin, every other row a full cell. */
+  applyRowTracks(layouts) {
+    const gs = this.gridState;
+    if (!gs || !gs.grid) return;
+    const rects = (layouts || []).map((l, i) => ({ l, thin: !!gs.spec.tiles[i] && gs.spec.tiles[i].viz === 'divider' }));
+    if (gs.addSpot) rects.push({ l: gs.addSpot, thin: false });
+    gs.grid.style.gridTemplateRows = rowTracks(rects, gs.cellH).map((px) => px + 'px').join(' ');
+  }
+
   applyGridDisplay(preview) {
     const gs = this.gridState;
     if (!gs) return;
     const layouts = preview || gs.layouts;
+    this.applyRowTracks(layouts);
     gs.tileEls.forEach((el, i) => {
       const l = layouts[i];
       if (!el || !l) return;
@@ -2438,8 +2522,11 @@ class SqliteDashboardsView extends ItemView {
     const gs = this.gridState;
     if (!gs) return;
     if (gs.addEl) { if (gs.addEl.parentElement) gs.addEl.parentElement.removeChild(gs.addEl); gs.addEl = null; }
-    if (!showAddTile(gs.spec.tiles.length, this.editMode)) return;
+    gs.addSpot = null;
+    if (!showAddTile(gs.spec.tiles.length, this.editMode)) { this.applyRowTracks(gs.layouts); return; }
     const spot = findSpot(gs.layouts, { w: 2, h: 1 }, gs.cols);
+    gs.addSpot = spot;
+    this.applyRowTracks(gs.layouts);
     const add = gs.grid.createDiv({ cls: 'icor-sqlv-tile icor-sqlv-add-tile' });
     add.setAttribute('role', 'button');
     add.setAttribute('tabindex', '0');
@@ -2567,7 +2654,9 @@ class SqliteDashboardsView extends ItemView {
     const origin = Object.assign({}, base[index]);
     const width = gs.grid.clientWidth || gs.cols * GRID_UNIT_PX;
     const cellW = width / gs.cols;
-    const cellH = gs.cellH + GRID_GAP_PX;
+    /* Rows differ in height once a thin divider row is in the grid. */
+    const tracks = rowTracks(base.map((l, j) => ({ l, thin: !!gs.spec.tiles[j] && gs.spec.tiles[j].viz === 'divider' })), gs.cellH);
+    const isDivider = !!gs.spec.tiles[index] && gs.spec.tiles[index].viz === 'divider';
     const tileEl = gs.tileEls[index];
     tileEl.classList.add('is-dragging');
     let placeholder = null;
@@ -2586,14 +2675,15 @@ class SqliteDashboardsView extends ItemView {
       const dx = mv.clientX - startX;
       const dy = mv.clientY - startY;
       const dCol = Math.round(dx / cellW);
-      const dRow = Math.round(dy / cellH);
+      const dRow = rowsForOffset(tracks, GRID_GAP_PX, mode === 'move' ? origin.y : origin.y + origin.h, dy, gs.cellH);
       const candidate = Object.assign({}, origin);
       if (mode === 'move') {
         candidate.x = origin.x + dCol;
         candidate.y = Math.max(0, origin.y + dRow);
       } else {
         candidate.w = Math.max(1, origin.w + dCol);
-        candidate.h = Math.max(1, origin.h + dRow);
+        /* A divider is sized in width only; its row stays thin. */
+        candidate.h = isDivider ? 1 : Math.max(1, origin.h + dRow);
       }
       const next = base.map((l, j) => (j === index ? candidate : Object.assign({}, l)));
       preview = packLayout(next, gs.cols, index);
@@ -2685,11 +2775,14 @@ class SqliteDashboardsView extends ItemView {
     const t0 = Date.now();
     const gs = this.gridState;
     gs.layouts = normalizeLayout(spec.tiles, gs.cols);
+    this.applyRowTracks(gs.layouts);
+    /* Dividers draw no data: they count as neither live nor cached. */
+    const dataCount = spec.tiles.filter((t) => t.viz !== 'divider').length;
 
     for (let i = 0; i < spec.tiles.length; i++) {
       const tile = spec.tiles[i];
       status.setText('Running query ' + (i + 1) + ' of ' + spec.tiles.length + (tile.title ? ': ' + tile.title : '') + ' …');
-      const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') + (this.editMode ? ' is-editing' : '') });
+      const tileEl = grid.createDiv({ cls: 'icor-sqlv-tile' + (tile.viz === 'stat' ? ' is-stat' : '') + (tile.viz === 'divider' ? ' is-divider' : '') + (this.editMode ? ' is-editing' : '') });
       gs.tileEls[i] = tileEl;
       const l = gs.layouts[i];
       tileEl.style.gridColumn = (l.x + 1) + ' / span ' + l.w;
@@ -2697,6 +2790,13 @@ class SqliteDashboardsView extends ItemView {
       if (this.editMode) {
         this.addTileActions(tileEl, spec, i);
         this.attachEditHandles(tileEl, i);
+      }
+      if (tile.viz === 'divider') {
+        /* Nothing to compute, on any device; the cache keeps its slot so
+         * every later widget's cached result stays at its own index. */
+        renderTile(tileEl, tile, { columns: [], rows: [] }, {});
+        cachedTiles.push(Object.assign({}, tile));
+        continue;
       }
       const db = tileDatabase(tile, spec);
       if (!db) {
@@ -2753,12 +2853,12 @@ class SqliteDashboardsView extends ItemView {
     let line;
     if (failed) {
       line = failed + ' of ' + spec.tiles.length + ' widgets failed; the errors are shown in their tiles.';
-    } else if (fromCache === spec.tiles.length) {
+    } else if (fromCache === dataCount && dataCount > 0) {
       line = 'Computed on desktop, ' + (cache ? relativeTime(cache.computedAt) : 'at an unknown time') + '.';
     } else if (fromCache > 0) {
-      line = (spec.tiles.length - fromCache) + ' live, ' + fromCache + ' from the desktop cache.';
+      line = (dataCount - fromCache) + ' live, ' + fromCache + ' from the desktop cache.';
     } else {
-      line = spec.tiles.length + (spec.tiles.length === 1 ? ' query' : ' queries') + ' in ' + (Date.now() - t0) + ' ms.';
+      line = dataCount + (dataCount === 1 ? ' query' : ' queries') + ' in ' + (Date.now() - t0) + ' ms.';
     }
     /* The cache the phone renders from. Only a fully live, fully healthy
      * run is worth freezing; anything less would overwrite a good cache. */
@@ -2880,7 +2980,10 @@ class WidgetFormModal extends Modal {
     const existing = editIndex >= 0 ? spec.tiles[editIndex] : null;
     const src = existing && existing.source ? existing.source : null;
     this.state = {
-      mode: existing && !existing.source ? 'sql' : 'form',
+      mode: existing && existing.viz === 'divider' ? 'divider' : (existing && !existing.source ? 'sql' : 'form'),
+      /* Where "A widget with data" goes back to from the divider form. */
+      dataMode: existing && existing.viz !== 'divider' && !existing.source ? 'sql' : 'form',
+      dividerWidth: existing ? '' : String(GRID_MAX_COLS),
       database: (src && src.database) || spec.database || '',
       table: (src && src.table) || '',
       metric: (src && src.metric) || '',
@@ -2988,6 +3091,7 @@ class WidgetFormModal extends Modal {
   /* The state as a tile, or a plain-words reason. */
   buildTile() {
     const s = this.state;
+    if (s.mode === 'divider') return { ok: true, tile: { title: String(s.title || '').trim(), viz: 'divider' } };
     if (s.mode === 'sql') {
       if (!s.sqlText.trim()) return { ok: false, reason: 'The SQL is empty.' };
       const gate = gateStatement(s.sqlText);
@@ -3067,6 +3171,14 @@ class WidgetFormModal extends Modal {
     }
     this.previewState = nextPreviewState(this.previewState, 'run');
     this.syncGate();
+    if (built.tile.viz === 'divider') {
+      /* Nothing to query: the preview is the divider itself. */
+      this.previewEl.empty();
+      renderTile(this.previewEl.createDiv({ cls: 'icor-sqlv-tile is-preview is-divider' }), built.tile, { columns: [], rows: [] }, {});
+      this.previewState = nextPreviewState(this.previewState, 'ok');
+      this.syncGate();
+      return;
+    }
     try {
       const tile = built.tile;
       const db = tileDatabase(tile, this.spec);
@@ -3169,6 +3281,12 @@ class WidgetFormModal extends Modal {
     form.empty();
 
     if (s.mode === 'sql') { this.renderSqlForm(form); return; }
+    if (s.mode === 'divider') { this.renderDividerForm(form); return; }
+    if (this.editIndex < 0) {
+      const divider = form.createEl('button', { text: 'Add a section divider instead', cls: 'icor-sqlv-add-filter' });
+      divider.setAttribute('aria-label', 'Add a section divider: a thin line with an optional heading, no data');
+      divider.addEventListener('click', () => this.toDivider());
+    }
 
     this.pickerField(form, {
       key: 'database', label: 'Database', required: true,
@@ -3292,8 +3410,8 @@ class WidgetFormModal extends Modal {
       const vizOptions = s.agg === 'latest' ? [['stat', 'One big number']]
         : [['line', 'Line chart'], ['bar', 'Bar chart'], ['stat', 'One big number']];
       this.nativeSelect(form, {
-        label: 'Chart type', options: vizOptions, value: s.viz,
-        onChange: (v) => { s.viz = v; this.renderForm(); this.touch(); },
+        label: 'Chart type', options: vizOptions.concat([['divider', 'Section divider']]), value: s.viz,
+        onChange: (v) => { if (v === 'divider') { this.toDivider(); return; } s.viz = v; this.renderForm(); this.touch(); },
       });
       if (s.series && s.viz === 'bar') {
         const stackRow = form.createDiv({ cls: 'icor-sqlv-wizard-toggle' });
@@ -3460,6 +3578,39 @@ class WidgetFormModal extends Modal {
     void note;
   }
 
+  toDivider() {
+    const s = this.state;
+    s.dataMode = s.mode === 'sql' ? 'sql' : 'form';
+    s.mode = 'divider';
+    if (!s.dividerWidth && this.editIndex < 0) s.dividerWidth = String(GRID_MAX_COLS);
+    this.openPicker = '';
+    this.renderForm();
+    this.touch();
+  }
+
+  /* The divider form: a heading and a width. No database, no query. */
+  renderDividerForm(form) {
+    const s = this.state;
+    this.nativeSelect(form, {
+      label: 'Widget type',
+      options: [['divider', 'Section divider'], ['data', 'A widget with data']],
+      value: 'divider',
+      onChange: (v) => { if (v === 'data') { s.mode = s.dataMode || 'form'; this.renderForm(); this.touch(); } },
+    });
+    form.createDiv({ cls: 'icor-sqlv-note', text: 'A thin line across the dashboard that separates groups of widgets, with an optional heading. In edit mode, drag its right end to change its width.' });
+    this.textInput(form, {
+      label: 'Heading', optional: true, value: s.title, placeholder: 'Body, Sleep, Activity …',
+      onInput: (v) => { s.title = v; this.touch(); },
+    });
+    this.nativeSelect(form, {
+      label: 'Width',
+      options: (this.editIndex >= 0 ? [['', 'Keep as is']] : []).concat([[String(GRID_MAX_COLS), 'Full width'], ['3', 'Half'], ['2', 'A third'], ['1', 'One cell']]),
+      value: s.dividerWidth,
+      onChange: (v) => { s.dividerWidth = v; },
+      ariaLabel: 'Width of the divider on the grid',
+    });
+  }
+
   renderSqlForm(form) {
     const s = this.state;
     form.createDiv({ cls: 'icor-sqlv-note', text: 'This widget is written in SQL. It runs read-only: one statement, starting with SELECT, WITH, PRAGMA or EXPLAIN.' });
@@ -3475,9 +3626,9 @@ class WidgetFormModal extends Modal {
     area.addEventListener('input', () => { s.sqlText = area.value; this.touch(); });
     this.nativeSelect(form, {
       label: 'Chart type',
-      options: [['line', 'Line chart'], ['bar', 'Bar chart'], ['stat', 'One big number'], ['table', 'Table']],
+      options: [['line', 'Line chart'], ['bar', 'Bar chart'], ['stat', 'One big number'], ['table', 'Table'], ['divider', 'Section divider']],
       value: s.viz,
-      onChange: (v) => { s.viz = v; this.renderForm(); this.touch(); },
+      onChange: (v) => { if (v === 'divider') { this.toDivider(); return; } s.viz = v; this.renderForm(); this.touch(); },
     });
     if (s.viz === 'line' || s.viz === 'bar') {
       this.textInput(form, { label: 'X column', value: s.x, onInput: (v) => { s.x = v; this.touch(); } });
@@ -3501,7 +3652,15 @@ class WidgetFormModal extends Modal {
     if (!built.ok) { new Notice(built.reason); return; }
     const tile = built.tile;
     const existing = this.editIndex >= 0 ? this.spec.tiles[this.editIndex] : null;
-    if (this.state.sizeKey && SIZE_PRESETS[this.state.sizeKey]) {
+    if (tile.viz === 'divider') {
+      /* One thin row; only the width is chosen. */
+      const w = Number(this.state.dividerWidth) || (existing && existing.layout ? existing.layout.w : GRID_MAX_COLS);
+      if (existing && existing.layout) {
+        tile.layout = { x: existing.layout.x, y: existing.layout.y, w, h: 1 };
+      } else {
+        tile.layout = findSpot(normalizeLayout(this.spec.tiles, GRID_MAX_COLS), { w, h: 1 }, GRID_MAX_COLS);
+      }
+    } else if (this.state.sizeKey && SIZE_PRESETS[this.state.sizeKey]) {
       const p = SIZE_PRESETS[this.state.sizeKey];
       if (existing && existing.layout) {
         tile.layout = { x: existing.layout.x, y: existing.layout.y, w: p.w, h: p.h };
@@ -4433,6 +4592,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
+  rowTracks, rowsForOffset, DIVIDER_ROW_PX, renderDivider,
   adoptLegacyFolders, LEGACY_DATA_FOLDER,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,

@@ -72,6 +72,7 @@
 .icor-sqlv-kicker,
 .icor-sqlv-dash-status,
 .icor-sqlv-tile-title,
+.icor-sqlv-divider-heading,
 .icor-sqlv-range-label,
 .icor-sqlv-wizard-crumbs,
 .icor-sqlv-wizard-group,
@@ -1366,3 +1367,77 @@ button.icor-sqlv-advanced-toggle:focus-visible { outline: 2px solid var(--sqlv-m
   .icor-sqlv-edit-toggle { min-height: 44px; }
   .icor-sqlv-tabs button { min-height: 44px; }
 }
+
+/* ---------------------------------------------------- section divider -- */
+
+/* A section divider is not a card: no ground, no frame, no padding. It
+ * lives in a thin grid row (DIVIDER_ROW_PX) and spans the width it is
+ * given. The line runs through the heading's vertical centre, starts 6px
+ * in from the left edge, and leaves a real 3px gap either side of the
+ * heading (no fill behind it), so it works on any background. */
+.icor-sqlv-tile.is-divider,
+.icor-sqlv-tile.is-divider:hover {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  overflow: hidden;
+}
+
+.icor-sqlv-divider {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-width: 0;
+}
+
+.icor-sqlv-divider::before,
+.icor-sqlv-divider::after {
+  content: '';
+  border-top: 1px solid var(--sqlv-hairline-strong);
+}
+
+.icor-sqlv-divider::before { flex: 0 0 6px; }
+
+.icor-sqlv-divider::after { flex: 1 1 auto; min-width: 0; }
+
+.icor-sqlv-divider-heading {
+  flex: 0 1 auto;
+  min-width: 0;
+  padding: 0 3px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* In edit mode the divider shows its extent, and its controls fit the
+ * thin row: the buttons centre vertically, the handle resizes sideways. */
+.icor-sqlv-tile.is-divider.is-editing {
+  outline: 1.5px dashed var(--sqlv-hairline-strong);
+  outline-offset: -1px;
+  border-radius: var(--sqlv-r-subtle);
+}
+
+.icor-sqlv-tile.is-divider .icor-sqlv-tile-actions {
+  top: 50%;
+  right: 24px;
+  transform: translateY(-50%);
+}
+
+.icor-sqlv-tile.is-divider .icor-sqlv-tile-action { width: 22px; height: 22px; }
+
+.icor-sqlv-tile.is-divider .icor-sqlv-resize-handle {
+  top: 50%;
+  bottom: auto;
+  right: 2px;
+  transform: translateY(-50%);
+  cursor: ew-resize;
+}
+
+/* The form's preview shows the divider at its real thin height. */
+.icor-sqlv-tile.is-preview.is-divider { height: 24px; }
