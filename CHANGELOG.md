@@ -4,6 +4,16 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.2] - 2026-11-02
+
+### Fixed
+- **Console result message only shows "capped at N" when rows were actually
+  capped.** The console previously showed "N rows in X ms, capped at 500"
+  whenever a LIMIT was added to the query, even when far fewer rows were
+  returned. It now fetches one extra row to detect whether more results
+  exist, and only displays the cap message when the result actually hit
+  the limit.
+
 ## [0.6.1] - 2026-09-26
 
 ### Fixed
