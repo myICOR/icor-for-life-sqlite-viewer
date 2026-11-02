@@ -126,15 +126,27 @@ test('the row cap lands on an uncapped SELECT and leaves a capped one alone', as
   const adapter = makeFakeAdapter({}, { '07 Data/x.db': new Uint8Array([1]) });
   adapter.getBasePath = () => '/vault';
   const { plugin } = await makeServicePlugin(adapter);
-  const deps = fakeCli((cb) => cb(null, '[]', ''));
+  const manyRows = JSON.stringify(Array.from({ length: 501 }, (_, i) => ({ id: i })));
+  const fewRows = JSON.stringify(Array.from({ length: 50 }, (_, i) => ({ id: i })));
+  let callCount = 0;
+  const deps = fakeCli((cb) => {
+    callCount++;
+    if (callCount === 1) cb(null, manyRows, '');
+    else if (callCount === 2) cb(null, fewRows, '');
+    else cb(null, '[]', '');
+  });
   plugin.query.deps = deps;
   plugin.query.cli = { ok: true, version: 'gate' };
-  const res = await plugin.query.query('07 Data/x.db', 'SELECT * FROM t', { cap: 500 });
-  assert.equal(res.capped, true);
-  assert.match(deps.calls[0].args[5], / LIMIT 500$/);
+  const resMany = await plugin.query.query('07 Data/x.db', 'SELECT * FROM t', { cap: 500 });
+  assert.equal(resMany.capped, true, 'capped should be true when result has more than cap rows');
+  assert.equal(resMany.rows.length, 500, 'result should be trimmed to cap');
+  assert.match(deps.calls[0].args[5], / LIMIT 501$/, 'LIMIT should be cap+1 to probe for more rows');
+  const resFew = await plugin.query.query('07 Data/x.db', 'SELECT * FROM t', { cap: 500 });
+  assert.equal(resFew.capped, false, 'capped should be false when result has fewer than cap rows');
+  assert.equal(resFew.rows.length, 50);
   await plugin.query.query('07 Data/x.db', 'SELECT * FROM t LIMIT 7', { cap: 500 });
-  assert.match(deps.calls[1].args[5], /LIMIT 7$/);
-  assert.doesNotMatch(deps.calls[1].args[5], /LIMIT 500/);
+  assert.match(deps.calls[2].args[5], /LIMIT 7$/);
+  assert.doesNotMatch(deps.calls[2].args[5], /LIMIT 50[01]/);
 });
 
 test('engine choice: no CLI and a file over the cap means no engine, in plain words', async () => {

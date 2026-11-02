@@ -329,15 +329,17 @@ function gateStatement(sql) {
 
 /* Add a LIMIT to a browsing query that has none, so a careless SELECT over
  * fifteen million rows comes back as a page, not a flood. PRAGMA and
- * EXPLAIN are left alone; a query that already limits itself is trusted. */
+ * EXPLAIN are left alone; a query that already limits itself is trusted.
+ * Fetches cap+1 rows so the caller can detect whether more exist. */
 function applyRowCap(sql, cap) {
   const stripped = stripSqlNoise(sql);
-  if (stripped === null) return { sql, capped: false };
+  if (stripped === null) return { sql, capped: false, cap: null };
   const kw = firstKeywordOf(stripped);
-  if (kw !== 'select' && kw !== 'with') return { sql, capped: false };
-  if (/\blimit\b/i.test(stripped)) return { sql, capped: false };
+  if (kw !== 'select' && kw !== 'with') return { sql, capped: false, cap: null };
+  if (/\blimit\b/i.test(stripped)) return { sql, capped: false, cap: null };
   const trimmed = String(sql).replace(/[\s;]+$/, '');
-  return { sql: trimmed + ' LIMIT ' + Math.max(1, Math.floor(cap)), capped: true };
+  const limit = Math.max(1, Math.floor(cap));
+  return { sql: trimmed + ' LIMIT ' + (limit + 1), capped: 'probe', cap: limit };
 }
 
 /* ------------------------------------------------------- result shaping -- */
@@ -1387,10 +1389,12 @@ class QueryService {
     if (!gate.ok) throw new Error(gate.reason);
     let finalSql = sql;
     let capped = false;
+    let rowCap = null;
     if (cap) {
       const r = applyRowCap(sql, cap);
       finalSql = r.sql;
       capped = r.capped;
+      rowCap = r.cap;
     }
     const choice = await this.engineFor(dbPath);
     if (!choice.engine) throw new Error(choice.reason);
@@ -1405,6 +1409,14 @@ class QueryService {
       });
     } else {
       table = await this.wasm.query(dbPath, finalSql);
+    }
+    if (capped === 'probe' && rowCap !== null) {
+      if (table.rows.length > rowCap) {
+        table.rows = table.rows.slice(0, rowCap);
+        capped = true;
+      } else {
+        capped = false;
+      }
     }
     return { columns: table.columns, rows: table.rows, ms: Date.now() - t0, engine: choice.engine, capped };
   }

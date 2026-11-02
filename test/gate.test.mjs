@@ -92,23 +92,25 @@ test('the empty and the blank query are refused', () => {
 
 test('row cap: an uncapped SELECT gets a LIMIT, a capped one is left alone', () => {
   const r = lib.applyRowCap('SELECT * FROM health_metric', 500);
-  assert.equal(r.capped, true);
-  assert.match(r.sql, /LIMIT 500$/);
+  assert.equal(r.capped, 'probe');
+  assert.equal(r.cap, 500);
+  assert.match(r.sql, /LIMIT 501$/);
   const already = lib.applyRowCap('SELECT * FROM t LIMIT 10', 500);
   assert.equal(already.capped, false);
+  assert.equal(already.cap, null);
   assert.equal(already.sql, 'SELECT * FROM t LIMIT 10');
 });
 
 test('row cap: a trailing semicolon is removed before the LIMIT lands', () => {
   const r = lib.applyRowCap('SELECT * FROM t;', 50);
-  assert.equal(r.sql, 'SELECT * FROM t LIMIT 50');
+  assert.equal(r.sql, 'SELECT * FROM t LIMIT 51');
 });
 
 test('row cap: PRAGMA and EXPLAIN are never edited, and LIMIT in a string does not count as a LIMIT', () => {
   assert.equal(lib.applyRowCap('PRAGMA table_info(t)', 500).capped, false);
   assert.equal(lib.applyRowCap('EXPLAIN SELECT * FROM t', 500).capped, false);
   const hidden = lib.applyRowCap("SELECT 'no limit here' FROM t", 500);
-  assert.equal(hidden.capped, true, "the word limit inside a string is data; the query still gets a real LIMIT");
+  assert.equal(hidden.capped, 'probe', "the word limit inside a string is data; the query still gets a real LIMIT");
 });
 
 test('browse queries: identifiers are quoted, filters become escaped LIKEs, paging is explicit', () => {
