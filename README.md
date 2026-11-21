@@ -43,7 +43,13 @@ too large to sync still shows you its answers.
   to your databases, and it cannot alter your data.
 - **Writes the dashboards you save**, as ordinary files in your vault.
 
-**It makes no network connection and starts no process.**
+- **On the desktop, starts the `sqlite3` tool once per query**, when your
+  computer has version 3.37.0 or newer: in safe mode (`-safe`) and read-only,
+  with your query as one argument and never through a shell. Safe mode shuts
+  the tool's own file and command functions. Without it, or on a phone, the
+  built-in engine (sql.js) reads the database instead.
+
+**It makes no network connection.**
 
 ## Good to know
 
