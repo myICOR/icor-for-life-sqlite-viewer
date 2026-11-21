@@ -4,6 +4,23 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.3] - 2026-11-21
+
+### Security
+- **A query can no longer reach files or programs on your computer.** On the
+  desktop the viewer asks the `sqlite3` tool, and read-only protected the
+  database file but not the rest of the disk: the tool's own `writefile()`,
+  `readfile()` and `edit()` functions passed the read-only check, so a query
+  or a dashboard file shared with you could write files or run a command.
+  Every query now runs in `sqlite3`'s safe mode (`-safe`), and the read-only
+  check also refuses those functions by name (with `load_extension`, `fsdir`
+  and `zipfile`). A `sqlite3` older than 3.37.0, which has no safe mode, is
+  no longer used; the built-in engine takes over.
+
+### Fixed
+- **README** said the viewer starts no process; it starts `sqlite3` on the
+  desktop, and now says so.
+
 ## [0.6.2] - 2026-11-02
 
 ### Fixed

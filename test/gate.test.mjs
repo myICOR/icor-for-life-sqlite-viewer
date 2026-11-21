@@ -260,3 +260,26 @@ test('write verbs inside names and strings do not trip the hardened gate', () =>
     assert.equal(lib.gateStatement(sql).ok, true, sql + ' must pass');
   }
 });
+
+test('functions that reach files, programs or native code are refused, wherever they appear', () => {
+  for (const sql of [
+    "SELECT writefile('/tmp/x', 'y')",
+    "SELECT readfile('/etc/hosts')",
+    "SELECT edit('x', 'open -a Calculator')",
+    "SELECT load_extension('/tmp/evil.dylib')",
+    "SELECT name FROM fsdir('/Users')",
+    "SELECT * FROM zipfile('/tmp/a.zip')",
+    "WITH a AS (SELECT WriteFile('/tmp/x', 'y')) SELECT * FROM a",
+    "SELECT 1 FROM t WHERE x = readfile ('/etc/passwd')",
+  ]) {
+    const r = lib.gateStatement(sql);
+    assert.equal(r.ok, false, sql);
+    assert.match(r.reason, /reaches files or programs/, sql);
+  }
+});
+
+test('the same words as data or as a quoted column name still pass', () => {
+  assert.equal(lib.gateStatement("SELECT 'writefile(1)' AS note").ok, true);
+  assert.equal(lib.gateStatement('SELECT "edit" FROM changes').ok, true);
+  assert.equal(lib.gateStatement('SELECT edit_count FROM t').ok, true);
+});

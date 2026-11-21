@@ -49,14 +49,14 @@ function fakeCli(behaviour) {
   };
 }
 
-test('Engine A: the SQL is one argument after -readonly and -json, never a shell string', async () => {
+test('Engine A: the SQL is one argument after -safe, -readonly and -json, never a shell string', async () => {
   const sql = "SELECT * FROM t WHERE a = 'x; rm -rf'";
   const deps = fakeCli((cb) => cb(null, '[{"a":1}]', ''));
   const table = await lib.cliQuery(deps, { absPath: '/v/x.db', sql, timeoutMs: 1234 });
   assert.equal(deps.calls.length, 1);
   const call = deps.calls[0];
   assert.equal(call.bin, 'sqlite3');
-  assert.deepEqual(unwrap(call.args), ['-readonly', '-json', '-cmd', '.timeout 5000', 'file:/v/x.db?mode=ro', sql]);
+  assert.deepEqual(unwrap(call.args), ['-safe', '-readonly', '-json', '-cmd', '.timeout 5000', 'file:/v/x.db?mode=ro', sql]);
   assert.equal(call.options.timeout, 1234);
   assert.equal(call.options.killSignal, 'SIGKILL');
   assert.deepEqual(unwrap(table), { columns: ['a'], rows: [[1]] });
@@ -140,13 +140,13 @@ test('the row cap lands on an uncapped SELECT and leaves a capped one alone', as
   const resMany = await plugin.query.query('07 Data/x.db', 'SELECT * FROM t', { cap: 500 });
   assert.equal(resMany.capped, true, 'capped should be true when result has more than cap rows');
   assert.equal(resMany.rows.length, 500, 'result should be trimmed to cap');
-  assert.match(deps.calls[0].args[5], / LIMIT 501$/, 'LIMIT should be cap+1 to probe for more rows');
+  assert.match(deps.calls[0].args.at(-1), / LIMIT 501$/, 'LIMIT should be cap+1 to probe for more rows');
   const resFew = await plugin.query.query('07 Data/x.db', 'SELECT * FROM t', { cap: 500 });
   assert.equal(resFew.capped, false, 'capped should be false when result has fewer than cap rows');
   assert.equal(resFew.rows.length, 50);
   await plugin.query.query('07 Data/x.db', 'SELECT * FROM t LIMIT 7', { cap: 500 });
-  assert.match(deps.calls[2].args[5], /LIMIT 7$/);
-  assert.doesNotMatch(deps.calls[2].args[5], /LIMIT 50[01]/);
+  assert.match(deps.calls[2].args.at(-1), /LIMIT 7$/);
+  assert.doesNotMatch(deps.calls[2].args.at(-1), /LIMIT 50[01]/);
 });
 
 test('engine choice: no CLI and a file over the cap means no engine, in plain words', async () => {
@@ -304,4 +304,47 @@ test('starter files are written once and never overwritten', async () => {
   await plugin.ensureStarterFiles();
   const writesAfter = adapter.log.slice(before).filter((l) => l[0] === 'write');
   assert.equal(writesAfter.length, 0, 'the second load writes nothing');
+});
+
+/* ------------------------------------------- Engine A: safe mode -- */
+/* Read-only protects the database file, not the computer. The sqlite3 shell
+ * adds writefile(), readfile() and edit() (which runs a command); without
+ * -safe a query or a shared dashboard tile could write files on the member's
+ * machine. These run the real sqlite3 when it is installed. */
+
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, existsSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+function systemSqlite3() {
+  try { return String(execFileSync('sqlite3', ['--version'])).trim().split(' ')[0]; } catch { return null; }
+}
+const sysVersion = systemSqlite3();
+
+test('Engine A: a query cannot write a file through the real sqlite3, even past the gate', { skip: !sysVersion || !lib.cliSupportsSafe(sysVersion) ? 'no sqlite3 3.37+ on this machine' : false }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sqlv-safe-'));
+  const db = join(dir, 'x.db');
+  execFileSync('sqlite3', [db, 'CREATE TABLE t(a); INSERT INTO t VALUES (1);']);
+  const target = join(dir, 'written-by-a-query.txt');
+  const deps = { childProcess: nodeRequire('child_process'), pathx: nodeRequire('path') };
+  /* cliQuery directly: the gate is the first wall, safe mode the second. */
+  await assert.rejects(
+    lib.cliQuery(deps, { absPath: db, sql: "SELECT writefile('" + target + "', 'x')" }),
+    /safe mode/
+  );
+  assert.equal(existsSync(target), false, 'no file was written');
+  const ok = await lib.cliQuery(deps, { absPath: db, sql: 'SELECT a FROM t' });
+  assert.deepEqual(unwrap(ok), { columns: ['a'], rows: [[1]] }, 'ordinary reads still work in safe mode');
+});
+
+test('detectCli: a sqlite3 older than 3.37 (no safe mode) is not used', async () => {
+  const old = fakeCli((cb) => cb(null, '3.36.0 2021-06-18 abcdef\n', ''));
+  const r = unwrap(await lib.detectCli(old));
+  assert.equal(r.ok, false);
+  assert.match(r.reason, /3\.37\.0 or newer/);
+  assert.equal(lib.cliSupportsSafe('3.37.0'), true);
+  assert.equal(lib.cliSupportsSafe('3.54.0'), true);
+  assert.equal(lib.cliSupportsSafe('3.8.11'), false);
+  assert.equal(lib.cliSupportsSafe(''), false);
 });

@@ -275,6 +275,12 @@ function firstKeywordOf(stripped) {
   return m ? m[1].toLowerCase() : '';
 }
 
+/* Functions the sqlite3 shell (and some builds) add that read or write
+ * files, start programs or load native code. Refused by name; strings and
+ * quoted identifiers are masked before this runs, so a column or a value
+ * spelled "edit" does not trip it. */
+const DISK_FUNCS_RE = /\b(writefile|readfile|edit|load_extension|fsdir|zipfile|sqlar_uncompress|lsmode)\s*\(/i;
+
 /* The gate every statement passes before any engine sees it. Exactly one
  * statement, read-only verbs only, no ATTACH. Returns { ok: true } or
  * { ok: false, reason } with the reason in plain words. */
@@ -305,6 +311,9 @@ function gateStatement(sql) {
    * write verbs are refused wherever they appear as words in the stripped
    * statement. Identifiers and strings are already masked, so a column
    * named "delete" cannot trip this and a bare verb cannot hide. */
+  if (DISK_FUNCS_RE.test(stripped)) {
+    return { ok: false, reason: 'That function reaches files or programs outside the database (writefile, readfile, edit, load_extension, fsdir, zipfile), so it is refused here.' };
+  }
   if (WRITE_VERBS_RE.test(stripped)) {
     return { ok: false, reason: 'Only read queries run here. A statement that writes (INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, VACUUM and friends) is refused, even behind a WITH clause.' };
   }
@@ -1217,8 +1226,15 @@ function detectCli(deps, bin) {
       deps.childProcess.execFile(bin || 'sqlite3', ['--version'], { timeout: 5000 }, (err, stdout) => {
         if (done) return;
         done = true;
-        if (err) resolve({ ok: false, reason: 'The sqlite3 command line tool was not found.' });
-        else resolve({ ok: true, version: String(stdout).trim().split(' ')[0] });
+        if (err) { resolve({ ok: false, reason: 'The sqlite3 command line tool was not found.' }); return; }
+        const version = String(stdout).trim().split(' ')[0];
+        /* Every query runs with -safe (see cliQuery), which sqlite3 has from
+         * 3.37.0. An older tool is not used: the built-in engine takes over. */
+        if (!cliSupportsSafe(version)) {
+          resolve({ ok: false, version, reason: 'The sqlite3 command line tool is ' + (version || 'of an unknown version') + '; this viewer needs 3.37.0 or newer for its safe mode, so it uses the built-in engine instead.' });
+          return;
+        }
+        resolve({ ok: true, version });
       });
     } catch (e) {
       if (!done) { done = true; resolve({ ok: false, reason: 'The sqlite3 command line tool was not found.' }); }
@@ -1226,15 +1242,28 @@ function detectCli(deps, bin) {
   });
 }
 
+/* -safe arrived in sqlite3 3.37.0 (2021-11-27). */
+function cliSupportsSafe(version) {
+  const m = /^(\d+)\.(\d+)\.(\d+)/.exec(String(version || ''));
+  if (!m) return false;
+  const [maj, min] = [Number(m[1]), Number(m[2])];
+  return maj > 3 || (maj === 3 && min >= 37);
+}
+
 /* ENGINE A: one sqlite3 process per query. The SQL is an argument, never a
  * shell string. Read-only twice over: the -readonly flag and mode=ro in the
  * URI. A busy timeout retries for a few seconds when another app is
  * writing to the database at that moment (live gate: the engagement loop
  * held a write lock and every tile failed with "database is locked").
+ * Safe mode (-safe) keeps the shell's own file and command functions shut.
  * A query that runs too long is killed, and says so in plain words. */
 function cliQuery(deps, { bin, absPath, sql, timeoutMs, maxBuffer }) {
   return new Promise((resolve, reject) => {
-    const args = ['-readonly', '-json', '-cmd', '.timeout 5000', dbFileUri(absPath), sql];
+    /* -safe: read-only protects the database file, not the computer. The
+     * sqlite3 shell adds functions that reach the disk and the shell
+     * (writefile, readfile, edit, load_extension, fsdir); safe mode refuses
+     * them, and the gate refuses them by name as a second wall. */
+    const args = ['-safe', '-readonly', '-json', '-cmd', '.timeout 5000', dbFileUri(absPath), sql];
     deps.childProcess.execFile(
       bin || 'sqlite3',
       args,
@@ -4431,7 +4460,7 @@ const EMBEDDED_SQL_WASM_B64 = 'AGFzbQEAAAABnwRFYAJ/fwF/YAF/AX9gA39/fwBgA39/fwF/Y
 /* The pure library, exposed for the gates. */
 IcorSqliteViewerPlugin.lib = {
   extOf, baseName, stemOf, formatBytes, formatNumber, relativeTime,
-  stripSqlNoise, gateStatement, applyRowCap,
+  stripSqlNoise, gateStatement, applyRowCap, cliSupportsSafe,
   cliTable, wasmTable, toCsv,
   quoteIdent, quoteLiteral, filterClause, buildBrowseQuery, buildCountQuery,
   isSidecarPath, isDbPath, isSkippedPath, findDatabases,
