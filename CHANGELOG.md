@@ -4,6 +4,11 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.6] - 2026-11-23
+
+### Changed
+- The display name is now ICOR SQLite Viewer (it was ICOR for Life - SQLite Viewer). The plugin id stays `icor-for-life-sqlite-viewer`, so installed vaults, settings and hotkeys carry on unchanged.
+
 ## [0.6.5] - 2026-11-23
 
 ### Security

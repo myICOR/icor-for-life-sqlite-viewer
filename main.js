@@ -1,4 +1,4 @@
-/* ICOR for Life - SQLite Viewer
+/* ICOR SQLite Viewer
  *
  * Open, browse and chart the SQLite databases that live inside the vault,
  * read-only, on every device.
