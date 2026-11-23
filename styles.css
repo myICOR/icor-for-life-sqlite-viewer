@@ -757,7 +757,22 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
   display: inline-block;
 }
 
-.icor-sqlv-stat { padding: var(--sqlv-s2) 0; }
+/* A stat tile never lets its edge cut a line of text. Top to bottom:
+ * the title (its own row, one line, ellipsis), the number (one line,
+ * ellipsis), the change line (two whole lines at most), and the footer
+ * with the level pill, bottom right. When space runs short only the
+ * change line gives way, to one line and then out, measured by
+ * fitStatCaption, so this holds at any font size. Font sizes stay the
+ * plugin's own. */
+.icor-sqlv-stat {
+  padding: var(--sqlv-s1) 0 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+  box-sizing: border-box;
+  overflow: hidden;
+}
 
 .icor-sqlv-stat-value {
   font-family: var(--sqlv-font-display);
@@ -765,6 +780,10 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
   font-weight: 640;
   color: var(--sqlv-fg);
   font-variant-numeric: tabular-nums;
+  flex: 0 0 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .icor-sqlv-stat-unit {
@@ -779,6 +798,65 @@ th:has(.icor-sqlv-sort-mark) .icor-sqlv-sort-label { color: var(--sqlv-fg-dim); 
   font-size: 11px;
   color: var(--sqlv-fg-faint);
   margin-top: var(--sqlv-s1);
+  flex: 0 0 auto;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+
+.icor-sqlv-stat-caption.is-clamped-1 { -webkit-line-clamp: 1; }
+
+.icor-sqlv-stat-caption.is-dropped { display: none; }
+
+/* The footer sits at the bottom of the stat, the pill at its right. It
+ * never shrinks; the change line above it gives way first. */
+.icor-sqlv-stat-foot {
+  flex: 0 0 auto;
+  margin-top: auto;
+  padding-top: var(--sqlv-s1);
+  display: flex;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.icor-sqlv-stat-foot .icor-sqlv-level-pill {
+  display: inline-block;
+  max-width: 100%;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Value levels: the level marks the tile's frame, never the number's ink.
+ * The colour arrives as one custom property (a theme variable or a hex);
+ * the look is chosen per widget type in the settings. The level name is
+ * the tile's accessible label, and the pill carries the range's text. */
+.icor-sqlv-tile.is-level-rail { border-left: 4px solid var(--sqlv-level-color); }
+
+.icor-sqlv-tile.is-level-outline,
+.icor-sqlv-tile.is-level-outline:hover {
+  border-color: var(--sqlv-level-color);
+  box-shadow: inset 0 0 0 1px var(--sqlv-level-color);
+}
+
+.icor-sqlv-tile.is-level-tint {
+  background: color-mix(in srgb, var(--sqlv-level-color) 14%, var(--sqlv-card));
+}
+
+.icor-sqlv-level-pill {
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--sqlv-font-mono);
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--sqlv-fg);
+  padding: 1px var(--sqlv-s2);
+  border-radius: var(--sqlv-r-pill);
+  border: 1px solid var(--sqlv-level-color, var(--sqlv-hairline));
 }
 
 /* ------------------------------------------------- edit mode: the grid -- */
@@ -1140,6 +1218,8 @@ button.icor-sqlv-picker:focus-visible {
 .icor-sqlv-filter-row-edit button.icor-sqlv-picker { flex: 1 1 8em; width: auto; }
 
 button.icor-sqlv-add-filter { align-self: flex-start; }
+
+.icor-sqlv-range-row .icor-sqlv-wizard-input.icor-sqlv-range-num { flex: 0 1 5em; min-width: 4em; }
 
 .icor-sqlv-form select.dropdown {
   background-color: var(--sqlv-well);
