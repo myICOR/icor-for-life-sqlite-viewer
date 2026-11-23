@@ -4,6 +4,14 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.4] - 2026-11-23
+
+### Changed
+- **The databases live in `05 Databases`.** ICOR for Life 3.0 puts its folders in ICOR stage order, so the default
+  home, its dashboards and their cache move from `07 Databases` to `05 Databases`. A vault that still has
+  `07 Databases` (or `07 Data` from before 0.5.0) and not the new folder keeps working against it, for the session and
+  without writing anything, as before.
+
 ## [0.6.3] - 2026-11-21
 
 ### Security

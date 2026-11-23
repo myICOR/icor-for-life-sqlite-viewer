@@ -30,8 +30,8 @@ test('default config, legacy vault: the legacy trio is adopted', () => {
 });
 
 test('default config, new vault: nothing is adopted', () => {
-  assert.equal(lib.adoptLegacyFolders(settings({}), { '07 Databases': true, '07 Data': true }),
-    null, 'the configured folder exists, so it wins even with the legacy folder present');
+  assert.equal(lib.adoptLegacyFolders(settings({}), { '05 Databases': true, '07 Databases': true, '07 Data': true }),
+    null, 'the configured folder exists, so it wins even with the legacy folders present');
   assert.equal(lib.adoptLegacyFolders(settings({}), { '07 Databases': false, '07 Data': false }),
     null, 'neither exists: keep the default, create nothing');
 });
@@ -97,6 +97,22 @@ test('a new vault with 07 Databases boots onto it, and starters follow the folde
 test('an empty vault boots onto the default and creates nothing', async () => {
   const adapter = makeFakeAdapter();
   const plugin = await bootPlugin(adapter);
-  assert.equal(plugin.settings.dataFolder, '07 Databases');
+  assert.equal(plugin.settings.dataFolder, '05 Databases');
   assert.equal(adapter.log.length, 0, 'loading never writes or creates folders');
+});
+
+/* ICOR for Life 3.0 puts the folders in ICOR stage order (Tom, 2026-11-23): the databases live in 05 Databases. A vault
+   from before keeps 07 Databases (or the older 07 Data) for the session, the same quiet adoption. */
+test('3.0 stages: the default home is 05 Databases', () => {
+  const s = settings({});
+  assert.equal(s.dataFolder, '05 Databases');
+  assert.equal(s.dashboardFolder, '05 Databases/Dashboards');
+  assert.equal(s.cacheFolder, '05 Databases/Dashboard Cache');
+});
+
+test('3.0 stages: a vault that still has 07 Databases keeps it, then 07 Data', () => {
+  assert.equal(JSON.stringify(lib.adoptLegacyFolders(settings({}), { '05 Databases': false, '07 Databases': true, '07 Data': true })),
+    JSON.stringify({ dataFolder: '07 Databases', dashboardFolder: '07 Databases/Dashboards', cacheFolder: '07 Databases/Dashboard Cache' }));
+  assert.equal(lib.adoptLegacyFolders(settings({}), { '05 Databases': false, '07 Databases': false, '07 Data': true }).dataFolder, '07 Data');
+  assert.equal(lib.adoptLegacyFolders(settings({}), { '05 Databases': true, '07 Databases': true }), null);
 });

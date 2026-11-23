@@ -133,23 +133,27 @@ const GRID_UNIT_PX = 170;
 const GRID_GAP_PX = 12;
 const SPAN_CAP = 12;
 
-/* Vaults from before 0.5.0 keep their "07 Data" home: when the configured
- * data folder does not exist but the legacy one does, the legacy folder is
- * adopted for this session, silently. A folder the member configured and
- * actually has always wins, and nothing is ever created just because it
- * is the default. Pure: existence arrives as a map. */
+/* Vaults from before keep their home: "07 Databases" from before ICOR for
+ * Life 3.0 put the folders in ICOR stage order (the default is now
+ * "05 Databases"), and "07 Data" from before 0.5.0. When the configured data
+ * folder does not exist but a legacy one does, the first legacy folder found
+ * is adopted for this session, silently. A folder the member configured and
+ * actually has always wins, and nothing is ever created just because it is
+ * the default. Pure: existence arrives as a map. Matched by full name. */
+const LEGACY_DATA_FOLDERS = ['07 Databases', '07 Data'];
 const LEGACY_DATA_FOLDER = '07 Data';
 
 function adoptLegacyFolders(settings, existsMap) {
   if (existsMap[settings.dataFolder]) return null;
-  if (settings.dataFolder === LEGACY_DATA_FOLDER) return null;
-  if (!existsMap[LEGACY_DATA_FOLDER]) return null;
-  const adopted = { dataFolder: LEGACY_DATA_FOLDER };
+  if (LEGACY_DATA_FOLDERS.includes(settings.dataFolder)) return null;
+  const legacy = LEGACY_DATA_FOLDERS.find((f) => existsMap[f]);
+  if (!legacy) return null;
+  const adopted = { dataFolder: legacy };
   if (settings.dashboardFolder === DEFAULT_SETTINGS.dashboardFolder) {
-    adopted.dashboardFolder = LEGACY_DATA_FOLDER + '/Dashboards';
+    adopted.dashboardFolder = legacy + '/Dashboards';
   }
   if (settings.cacheFolder === DEFAULT_SETTINGS.cacheFolder) {
-    adopted.cacheFolder = LEGACY_DATA_FOLDER + '/Dashboard Cache';
+    adopted.cacheFolder = legacy + '/Dashboard Cache';
   }
   return adopted;
 }
@@ -159,9 +163,9 @@ const DEFAULT_SETTINGS = {
   rowCap: 500,
   queryTimeoutSec: 30,
   mobileCapMb: 200,
-  dashboardFolder: '07 Databases/Dashboards',
-  cacheFolder: '07 Databases/Dashboard Cache',
-  dataFolder: '07 Databases',
+  dashboardFolder: '05 Databases/Dashboards',
+  cacheFolder: '05 Databases/Dashboard Cache',
+  dataFolder: '05 Databases',
   sqlite3Path: '',
   /* The mobile catalog carries structure only unless this is on. */
   catalogIncludeValues: false,
@@ -461,7 +465,7 @@ function parseDashboardSpec(text) {
     return { ok: false, reason: 'The dashboard needs a "title".' };
   }
   if (raw.database !== undefined && (typeof raw.database !== 'string' || !raw.database.trim())) {
-    return { ok: false, reason: 'The "database" must be a vault path like "07 Databases/example.db".' };
+    return { ok: false, reason: 'The "database" must be a vault path like "05 Databases/example.db".' };
   }
   if (!validTimeframe(raw.globalTimeframe, false)) {
     return { ok: false, reason: 'The "globalTimeframe" must be a preset like {"preset":"90d"} or {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}.' };
@@ -680,7 +684,7 @@ function legacyCatalogPathFor(cacheFolder, dbPath) {
  * data folder moves to its top level, sidecars travel with their database,
  * nothing is ever overwritten. Pure: takes paths, returns the plan. */
 function planMigration(dbPaths, existingPaths, targetRoot) {
-  const root = normalizePath(targetRoot || '07 Databases');
+  const root = normalizePath(targetRoot || '05 Databases');
   const moves = [];
   const skips = [];
   const claimed = new Set();
@@ -3919,7 +3923,7 @@ writes these same files; editing them by hand stays fine.
 {
   "id": "my-dashboard",
   "title": "My Dashboard",
-  "database": "07 Databases/example.db",
+  "database": "05 Databases/example.db",
   "globalTimeframe": { "preset": "90d" },
   "tiles": [
     {
@@ -4186,16 +4190,14 @@ class IcorSqliteViewerPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }
 
-  /* The 0.5.0 rename: the default home moved from "07 Data" to
-   * "07 Databases". A vault that still has the old folder and not the new
-   * one keeps working against the old one, silently, for this session.
-   * Nothing is written and nothing is created here. */
+  /* The renames: "07 Data" (before 0.5.0), then "07 Databases" (before
+   * ICOR for Life 3.0's stage order), now "05 Databases". A vault that still
+   * has an old folder and not the new one keeps working against the old one,
+   * silently, for this session. Nothing is written and nothing is created. */
   async adoptFoldersIfLegacy() {
     const adapter = this.app.vault.adapter;
-    const existsMap = {
-      [this.settings.dataFolder]: await adapter.exists(this.settings.dataFolder),
-      [LEGACY_DATA_FOLDER]: await adapter.exists(LEGACY_DATA_FOLDER),
-    };
+    const existsMap = { [this.settings.dataFolder]: await adapter.exists(this.settings.dataFolder) };
+    for (const f of LEGACY_DATA_FOLDERS) existsMap[f] = await adapter.exists(f);
     const adopted = adoptLegacyFolders(this.settings, existsMap);
     if (adopted) Object.assign(this.settings, adopted);
   }
@@ -4322,7 +4324,7 @@ class IcorSqliteViewerPlugin extends Plugin {
     await ensureFolder(adapter, folder);
     const readmePath = folder + '/README.md';
     if (!(await adapter.exists(readmePath))) {
-      await adapter.write(readmePath, DASHBOARD_README.replace(/07 Databases/g, this.settings.dataFolder));
+      await adapter.write(readmePath, DASHBOARD_README.replace(/05 Databases/g, this.settings.dataFolder));
     }
     for (const starter of STARTER_DASHBOARDS) {
       const path = folder + '/' + starter.file;
@@ -4474,7 +4476,7 @@ IcorSqliteViewerPlugin.lib = {
   FILTER_OPS, filterConditionOf, filtersCondOf, COMPARE_LABELS, canCompare,
   deltaBadge, nextPreviewState, canSave, SIZE_PRESETS, sizePresetOf, makeDebounce,
   chartLayout, xLabelPlan, CHART_MIN_X_H, CHART_MIN_Y_W, TICK_CHAR_W, renderTile,
-  adoptLegacyFolders, LEGACY_DATA_FOLDER,
+  adoptLegacyFolders, LEGACY_DATA_FOLDER, LEGACY_DATA_FOLDERS,
   shortHash, dbKeyOf, legacyCatalogPathFor, safeLogLine, checkSqlite3Path, READ_PRAGMAS, READ_PRAGMA_FUNCS,
   dbFileUri, detectCli, cliQuery, executeMigration, ensureFolder,
   bytesOfB64, utf8OfB64, EMBEDDED_SQL_WASM_JS_B64, EMBEDDED_SQL_WASM_B64,
