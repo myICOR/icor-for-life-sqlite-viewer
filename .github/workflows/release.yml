@@ -9,7 +9,7 @@ name: Release
 # is not on main. Only then does the shared release logic publish.
 #
 # Asset set: main.js, manifest.json, styles.css, plus the SQLite engine the
-# plugin loads at runtime, sql-wasm.js and sql-wasm.wasm (extra-assets). All
+# plugin can load at runtime, sql-wasm.wasm (extra-assets; main.js embeds it too). All
 # five are tracked in git; the release publishes them, the provenance job
 # signs them and the verify job compares every one with the tag.
 #
@@ -89,7 +89,7 @@ jobs:
     uses: myICOR/.github/.github/workflows/obsidian-release.yml@main
     with:
       kind: plugin
-      extra-assets: sql-wasm.js sql-wasm.wasm
+      extra-assets: sql-wasm.wasm
       dry-run: ${{ github.event_name == 'workflow_dispatch' }}
 
   verify:
@@ -100,5 +100,5 @@ jobs:
     uses: myICOR/.github/.github/workflows/obsidian-version-gate.yml@main
     with:
       kind: plugin
-      extra-assets: sql-wasm.js sql-wasm.wasm
+      extra-assets: sql-wasm.wasm
       open-issue: ${{ github.event_name != 'workflow_dispatch' }}

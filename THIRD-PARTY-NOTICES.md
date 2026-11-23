@@ -8,17 +8,17 @@ ICOR for Life - SQLite Viewer bundles one third-party component.
 build of SQLite, vendored unmodified from
 https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.13.0/. It is the engine
 that reads databases on phones and tablets, and on desktops without the
-sqlite3 command line tool. The files ship two ways, and nothing is ever
-downloaded:
+sqlite3 command line tool. Both files are vendored in the repository, and nothing is ever downloaded.
+`main.js` embeds them, because Obsidian's community-directory installer
+downloads only `main.js`, `manifest.json` and `styles.css`:
 
-- As the two standalone files inside the plugin folder (manual installs).
-- Embedded in `main.js` as base64 strings, byte-identical to the
-  standalone files once decoded, because Obsidian's community-directory
-  installer downloads only `main.js`, `manifest.json` and `styles.css`.
+- `sql-wasm.js` as plain code, verbatim, inside a function
+  (`scripts/embed-sql-js.mjs` writes it; no `Function` constructor, no eval).
+- `sql-wasm.wasm` as a base64 string.
 
-The standalone copies are preferred when both are present; the embedded
-copies answer otherwise. A test gate asserts the embedded copies decode
-byte-identical to the standalone files.
+A standalone `sql-wasm.wasm` in the plugin folder (manual installs) is used
+when present; code is never read from the plugin folder. A test gate asserts
+the embedded copies match the vendored files byte for byte.
 
 SHA-256 of the vendored standalone files (unchanged since 0.5.0; the
 embedded copies are the same bytes in base64 encoding):
