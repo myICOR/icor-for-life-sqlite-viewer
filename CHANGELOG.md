@@ -4,6 +4,35 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.6] - 2026-11-23
+
+### Changed
+- The display name is now ICOR SQLite Viewer (it was ICOR for Life - SQLite Viewer). The plugin id stays `icor-for-life-sqlite-viewer`, so installed vaults, settings and hotkeys carry on unchanged.
+
+## [0.6.5] - 2026-11-23
+
+### Security
+- **The built-in engine no longer turns text into code.** sql.js used to be
+  embedded as a base64 string and started with the `Function` constructor,
+  and a `sql-wasm.js` placed in the plugin folder was read and run the same
+  way. sql.js is now embedded in `main.js` as plain code, generated from the
+  vendored file by `scripts/embed-sql-js.mjs`; nothing read from disk is
+  ever evaluated. A standalone `sql-wasm.wasm` beside the plugin is still
+  used when present. The Obsidian community directory's review refuses the
+  `Function` constructor, so this also clears the way for the listing.
+
+### Changed
+- Releases carry `sql-wasm.wasm` as the only extra file; `sql-wasm.js` is
+  no longer read at runtime.
+
+## [0.6.4] - 2026-11-23
+
+### Changed
+- **The databases live in `05 Databases`.** ICOR for Life 3.0 puts its folders in ICOR stage order, so the default
+  home, its dashboards and their cache move from `07 Databases` to `05 Databases`. A vault that still has
+  `07 Databases` (or `07 Data` from before 0.5.0) and not the new folder keeps working against it, for the session and
+  without writing anything, as before.
+
 ## [0.6.3] - 2026-11-21
 
 ### Security

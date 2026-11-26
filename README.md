@@ -1,4 +1,4 @@
-# ICOR for Life - SQLite Viewer
+# ICOR SQLite Viewer
 
 **Read the databases in your vault, on any device.**
 

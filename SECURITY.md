@@ -1,6 +1,6 @@
 # Security Policy
 
-ICOR for Life - SQLite Viewer is a local-only Obsidian plugin. It makes no
+ICOR SQLite Viewer is a local-only Obsidian plugin. It makes no
 network requests and it stores no credentials. Its whole job is to READ the
 member's own SQLite databases, so the security surface is the read-only
 promise, and this file says so plainly and names what a report should be

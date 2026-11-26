@@ -196,13 +196,29 @@ test('Engine B end to end: real bytes through the plugin loader, on the mobile p
 
 /* -------------------------------------- the embedded runtime (0.5.3) -- */
 
-test('the embedded copies decode byte-identical to the vendored standalone files', () => {
-  const embeddedJs = Buffer.from(lib.utf8OfB64(lib.EMBEDDED_SQL_WASM_JS_B64), 'utf8');
-  assert.ok(embeddedJs.equals(readFileSync(resolve(repo, 'sql-wasm.js'))),
-    'embedded sql-wasm.js drifted from the vendored file; regenerate per the comment in main.js');
+test('the embedded copies match the vendored standalone files byte for byte', () => {
+  /* sql-wasm.js is embedded as code between the generator's markers. */
+  const main = readFileSync(resolve(repo, 'main.js'), 'utf8');
+  const from = main.indexOf('/* ---- sql-wasm.js, verbatim, from here ---- */\n');
+  const to = main.indexOf('\n  /* ---- sql-wasm.js ends here ---- */');
+  assert.ok(from > 0 && to > from, 'the embedded sql.js markers are missing; run node scripts/embed-sql-js.mjs');
+  const embeddedJs = main.slice(from + '/* ---- sql-wasm.js, verbatim, from here ---- */\n'.length, to);
+  assert.equal(embeddedJs, readFileSync(resolve(repo, 'sql-wasm.js'), 'utf8'),
+    'embedded sql-wasm.js drifted from the vendored file; run node scripts/embed-sql-js.mjs');
   const embeddedWasm = Buffer.from(lib.bytesOfB64(lib.EMBEDDED_SQL_WASM_B64));
   assert.ok(embeddedWasm.equals(readFileSync(resolve(repo, 'sql-wasm.wasm'))),
-    'embedded sql-wasm.wasm drifted from the vendored file; regenerate per the comment in main.js');
+    'embedded sql-wasm.wasm drifted from the vendored file; run node scripts/embed-sql-js.mjs');
+  assert.equal(typeof lib.sqlJsModule(undefined), 'function', 'the embedded sql.js exports initSqlJs');
+});
+
+test('main.js evaluates no code from strings: no Function constructor, no eval (0.6.4)', () => {
+  /* The Obsidian community directory's review refuses both as security
+   * errors, and a plugin that never turns text into code cannot be made to
+   * run a string it read from disk. */
+  const main = readFileSync(resolve(repo, 'main.js'), 'utf8');
+  assert.doesNotMatch(main, /\bnew\s+Function\s*\(/);
+  assert.doesNotMatch(main, /(^|[^.\w])Function\s*\(\s*['"`]/m);
+  assert.doesNotMatch(main, /(^|[^.\w$])eval\s*\(/m);
 });
 
 test('Engine B on a three-file install: the embedded sql.js answers with no standalone files present', async () => {
@@ -227,7 +243,7 @@ test('Engine B on a three-file install: the embedded sql.js answers with no stan
   assert.deepEqual(unwrap(res.rows), [[1]]);
 });
 
-test('a five-file install still prefers the standalone copies over the embedded ones', async () => {
+test('a manual install with a standalone sql-wasm.wasm uses it, and never reads code from disk', async () => {
   const initSqlJs = nodeRequire(resolve(repo, 'sql-wasm.js'));
   const SQL = await initSqlJs({ wasmBinary: readFileSync(resolve(repo, 'sql-wasm.wasm')) });
   const source = new SQL.Database();
@@ -236,21 +252,28 @@ test('a five-file install still prefers the standalone copies over the embedded 
   source.close();
 
   const pluginDir = '.obsidian/plugins/icor-for-life-sqlite-viewer';
+  /* A planted sql-wasm.js beside the plugin must be ignored: the engine
+   * runs only the code embedded in main.js. */
   const adapter = makeFakeAdapter(
-    { [pluginDir + '/sql-wasm.js']: readFileSync(resolve(repo, 'sql-wasm.js'), 'utf8') },
+    { [pluginDir + '/sql-wasm.js']: 'throw new Error("planted code ran");' },
     {
       [pluginDir + '/sql-wasm.wasm']: readFileSync(resolve(repo, 'sql-wasm.wasm')),
       '07 Data/tiny.db': bytes,
     }
   );
   const reads = [];
+  const binReads = [];
   const origRead = adapter.read.bind(adapter);
+  const origBin = adapter.readBinary.bind(adapter);
   adapter.read = async (p) => { reads.push(p); return origRead(p); };
+  adapter.readBinary = async (p) => { binReads.push(p); return origBin(p); };
   const { plugin } = await makeServicePlugin(adapter, { desktop: false });
   const res = await plugin.query.query('07 Data/tiny.db', 'SELECT 1 AS one');
   assert.equal(res.engine, 'wasm');
-  assert.ok(reads.includes(pluginDir + '/sql-wasm.js'),
-    'the standalone sql-wasm.js must be the copy the engine reads when it exists');
+  assert.deepEqual(unwrap(res.rows), [[1]]);
+  assert.ok(binReads.includes(pluginDir + '/sql-wasm.wasm'),
+    'the standalone sql-wasm.wasm must be the copy the engine loads when it exists');
+  assert.ok(!reads.includes(pluginDir + '/sql-wasm.js'), 'no code is read from the plugin folder');
 });
 
 /* ---------------------------------------------------- the dashboard cache -- */
