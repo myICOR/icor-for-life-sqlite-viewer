@@ -133,19 +133,30 @@ const GRID_UNIT_PX = 170;
 const GRID_GAP_PX = 12;
 const SPAN_CAP = 12;
 
-/* Vaults from before keep their home: "07 Databases" from before ICOR for
- * Life 3.0 put the folders in ICOR stage order (the default is now
- * "05 Databases"), and "07 Data" from before 0.5.0. When the configured data
- * folder does not exist but a legacy one does, the first legacy folder found
- * is adopted for this session, silently. A folder the member configured and
- * actually has always wins, and nothing is ever created just because it is
- * the default. Pure: existence arrives as a map. Matched by full name. */
-const LEGACY_DATA_FOLDERS = ['07 Databases', '07 Data'];
+/* Vaults from before keep their home: "05 Databases" from early ICOR for
+ * Life 3.0 (the default is now "11 Databases", the Workbench layout),
+ * "07 Databases" from 2.x, and "07 Data" from before 0.5.0. When the
+ * configured data folder does not exist but a legacy one does, the first
+ * legacy folder found is adopted for this session, silently. A saved old
+ * default whose folder is gone follows to the current default once the vault
+ * has it, with the dashboard and cache folders that sat inside it. A folder
+ * the member configured and actually has always wins, and nothing is ever
+ * created just because it is the default. Pure: existence arrives as a map.
+ * Matched by full name. */
+const LEGACY_DATA_FOLDERS = ['05 Databases', '07 Databases', '07 Data'];
 const LEGACY_DATA_FOLDER = '07 Data';
 
 function adoptLegacyFolders(settings, existsMap) {
   if (existsMap[settings.dataFolder]) return null;
-  if (LEGACY_DATA_FOLDERS.includes(settings.dataFolder)) return null;
+  if (LEGACY_DATA_FOLDERS.includes(settings.dataFolder)) {
+    const from = settings.dataFolder;
+    const to = DEFAULT_SETTINGS.dataFolder;
+    if (!existsMap[to]) return null;
+    const followed = { dataFolder: to };
+    if (settings.dashboardFolder === from + '/Dashboards') followed.dashboardFolder = DEFAULT_SETTINGS.dashboardFolder;
+    if (settings.cacheFolder === from + '/Dashboard Cache') followed.cacheFolder = DEFAULT_SETTINGS.cacheFolder;
+    return followed;
+  }
   const legacy = LEGACY_DATA_FOLDERS.find((f) => existsMap[f]);
   if (!legacy) return null;
   const adopted = { dataFolder: legacy };
@@ -163,9 +174,9 @@ const DEFAULT_SETTINGS = {
   rowCap: 500,
   queryTimeoutSec: 30,
   mobileCapMb: 200,
-  dashboardFolder: '05 Databases/Dashboards',
-  cacheFolder: '05 Databases/Dashboard Cache',
-  dataFolder: '05 Databases',
+  dashboardFolder: '11 Databases/Dashboards',
+  cacheFolder: '11 Databases/Dashboard Cache',
+  dataFolder: '11 Databases',
   sqlite3Path: '',
   /* The mobile catalog carries structure only unless this is on. */
   catalogIncludeValues: false,
@@ -465,7 +476,7 @@ function parseDashboardSpec(text) {
     return { ok: false, reason: 'The dashboard needs a "title".' };
   }
   if (raw.database !== undefined && (typeof raw.database !== 'string' || !raw.database.trim())) {
-    return { ok: false, reason: 'The "database" must be a vault path like "05 Databases/example.db".' };
+    return { ok: false, reason: 'The "database" must be a vault path like "11 Databases/example.db".' };
   }
   if (!validTimeframe(raw.globalTimeframe, false)) {
     return { ok: false, reason: 'The "globalTimeframe" must be a preset like {"preset":"90d"} or {"from":"YYYY-MM-DD","to":"YYYY-MM-DD"}.' };
@@ -680,7 +691,7 @@ function legacyCatalogPathFor(cacheFolder, dbPath) {
  * data folder moves to its top level, sidecars travel with their database,
  * nothing is ever overwritten. Pure: takes paths, returns the plan. */
 function planMigration(dbPaths, existingPaths, targetRoot) {
-  const root = normalizePath(targetRoot || '05 Databases');
+  const root = normalizePath(targetRoot || '11 Databases');
   const moves = [];
   const skips = [];
   const claimed = new Set();
@@ -3902,7 +3913,7 @@ writes these same files; editing them by hand stays fine.
 {
   "id": "my-dashboard",
   "title": "My Dashboard",
-  "database": "05 Databases/example.db",
+  "database": "11 Databases/example.db",
   "globalTimeframe": { "preset": "90d" },
   "tiles": [
     {
@@ -4169,13 +4180,16 @@ class IcorSqliteViewerPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }
 
-  /* The renames: "07 Data" (before 0.5.0), then "07 Databases" (before
-   * ICOR for Life 3.0's stage order), now "05 Databases". A vault that still
+  /* The renames: "07 Data" (before 0.5.0), "07 Databases" (2.x), then
+   * "05 Databases" (early 3.0), now "11 Databases". A vault that still
    * has an old folder and not the new one keeps working against the old one,
    * silently, for this session. Nothing is written and nothing is created. */
   async adoptFoldersIfLegacy() {
     const adapter = this.app.vault.adapter;
-    const existsMap = { [this.settings.dataFolder]: await adapter.exists(this.settings.dataFolder) };
+    const existsMap = {
+      [this.settings.dataFolder]: await adapter.exists(this.settings.dataFolder),
+      [DEFAULT_SETTINGS.dataFolder]: await adapter.exists(DEFAULT_SETTINGS.dataFolder),
+    };
     for (const f of LEGACY_DATA_FOLDERS) existsMap[f] = await adapter.exists(f);
     const adopted = adoptLegacyFolders(this.settings, existsMap);
     if (adopted) Object.assign(this.settings, adopted);
@@ -4303,7 +4317,7 @@ class IcorSqliteViewerPlugin extends Plugin {
     await ensureFolder(adapter, folder);
     const readmePath = folder + '/README.md';
     if (!(await adapter.exists(readmePath))) {
-      await adapter.write(readmePath, DASHBOARD_README.replace(/05 Databases/g, this.settings.dataFolder));
+      await adapter.write(readmePath, DASHBOARD_README.replace(/11 Databases/g, this.settings.dataFolder));
     }
     for (const starter of STARTER_DASHBOARDS) {
       const path = folder + '/' + starter.file;

@@ -4,6 +4,11 @@ All notable changes to ICOR for Life - SQLite Viewer.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 Versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] - 2026-11-28
+
+### Changed
+- The Workbench layout: the default home for databases, dashboards and the dashboard cache is `11 Databases`. A vault that still has `05 Databases` (early 3.0), `07 Databases` (2.x) or `07 Data` keeps working there, silently. A saved old default follows to `11 Databases` once the vault has moved, with the dashboard and cache folders that sat inside it.
+
 ## [0.6.6] - 2026-11-23
 
 ### Changed
